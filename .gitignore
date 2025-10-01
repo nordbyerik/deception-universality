@@ -1,7 +1,10 @@
 # Byte-compiled / optimized / DLL files
 AGENTS.md
 .claude/
-
+samples/
+probe_checkpoints/
+activation_cache/
+cache/
 
 __pycache__/
 *.py[codz]
@@ -209,3 +212,4 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+.aider*

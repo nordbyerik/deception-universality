@@ -75,8 +75,20 @@ class TokenizedProbingDataset(ProbingDataset):
                 raise TypeError(
                     "All examples must be TokenizedProbingExample instances"
                 )
-            if any(t >= self.tokenization_config.vocab_size for t in example.tokens):
-                raise ValueError(f"Invalid token ID found in example: {example.text}")
+
+            # Allow special tokens (pad, eos, bos) that might equal vocab_size
+            valid_special_token_ids = set()
+            if self.tokenization_config.pad_token_id is not None:
+                valid_special_token_ids.add(self.tokenization_config.pad_token_id)
+            if self.tokenization_config.eos_token_id is not None:
+                valid_special_token_ids.add(self.tokenization_config.eos_token_id)
+            if self.tokenization_config.bos_token_id is not None:
+                valid_special_token_ids.add(self.tokenization_config.bos_token_id)
+
+            for t in example.tokens:
+                # Token is invalid if it's >= vocab_size AND not a valid special token
+                if t >= self.tokenization_config.vocab_size and t not in valid_special_token_ids:
+                    raise ValueError(f"Invalid token ID {t} found in example: {example.text}")
 
     def _to_hf_dataset(self) -> Dataset:
         """Override parent method to include tokenization data."""

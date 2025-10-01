@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Simple script to load and test Qwen 0.6B model using probity for activation extraction.
-This demonstrates using probity's collection system for probe-ready activations.
+Simple script to load a dataset using the deception-detection repository,
+and then use probity to extract activations and train truthfulness probes.
 """
 
 import torch
 from transformers import AutoTokenizer
 from probity.datasets.base import ProbingExample, ProbingDataset
-from probity.datasets.tokenized import TokenizedProbingDataset
+from probity.datasets.tokenized import TokenizedProbingDataset, TokenPositions
 from probity.collection.collectors import (
     TransformerLensCollector,
     TransformerLensConfig,
@@ -30,17 +30,34 @@ from probity.training.trainer import (
     DirectionalProbeTrainer,
     DirectionalTrainerConfig,
 )
+from probity.pipeline.pipeline import ProbePipeline, ProbePipelineConfig
 import os
 from typing import Dict, List, Tuple, Optional
+import logging
+import pickle
+import numpy as np
+import pandas as pd
+import csv
+from transformers import AutoConfig
+
+# Import the new dataset repository
+from data.deception_detection.deception_detection.repository import DatasetRepository
+from data.deception_detection.deception_detection.types import dialogue_to_string
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
-def create_simple_dataset(texts_with_labels):
+def create_simple_dataset(texts_with_labels: List[Tuple[str, bool]]) -> ProbingDataset:
     """Create a simple probing dataset from text-label pairs."""
     examples = []
-    for text, label in texts_with_labels:
+    for dialogue, label in texts_with_labels:
+        # Convert dialogue to string using dialogue_to_string with qwen format
+        text = dialogue_to_string(dialogue, "qwen")
         example = ProbingExample(
             text=text,
-            label=1 if label else 0,  # Convert boolean to int
+            label=1 if "deceptive" in label.value else 0,  # Convert boolean to int
             label_text=str(label),
         )
         examples.append(example)
@@ -48,14 +65,32 @@ def create_simple_dataset(texts_with_labels):
     return ProbingDataset(examples=examples, task_type="classification")
 
 
-def setup_collector(model_name="Qwen/Qwen2.5-0.5B"):
+def setup_collector(
+    model_name: str = "Qwen/Qwen2.5-0.5B",
+) -> Tuple[TransformerLensCollector, TransformerLensConfig]:
     """Setup the probity collector for activation extraction."""
-    # Define which layers we want to extract activations from
-    # For Qwen models, we'll extract from multiple residual stream positions
-    hook_points = [
-        "blocks.12.hook_resid_post",  # Middle layer
-        "blocks.23.hook_resid_post",  # Final layer (Qwen2.5-0.5B has 24 layers)
-    ]
+    # Get model config to determine number of layers
+    model_config = AutoConfig.from_pretrained(model_name)
+    num_layers = model_config.num_hidden_layers
+    logger.info(f"Model {model_name} has {num_layers} layers")
+
+    if num_layers <= 10:
+        layer_indices = list(range(num_layers))
+    else:
+        layer_indices = [0, num_layers - 1]
+
+        if num_layers > 2:
+            middle_layers = np.linspace(
+                1, num_layers - 2, min(8, num_layers - 2), dtype=int
+            )
+            layer_indices.extend(middle_layers.tolist())
+
+        layer_indices = sorted(list(set(layer_indices)))
+
+    hook_points = [f"blocks.{i}.hook_resid_post" for i in layer_indices]
+
+    logger.info(f"Selected layers: {layer_indices}")
+    logger.info(f"Hook points: {hook_points}")
 
     config = TransformerLensConfig(
         model_name=model_name,
@@ -64,49 +99,42 @@ def setup_collector(model_name="Qwen/Qwen2.5-0.5B"):
         device="cuda" if torch.cuda.is_available() else "cpu",
     )
 
-    print(f"Initializing collector for {model_name}...")
     collector = TransformerLensCollector(config)
 
     return collector, config
 
 
-def extract_activations_with_probity(collector, dataset):
-    """Extract activations using probity's collection system."""
-    print("\nExtracting activations using probity...")
-
-    # Collect activations for all hook points
-    activation_stores = collector.collect(dataset)
-
-    # Print info about collected activations
-    for hook_point, store in activation_stores.items():
-        print(f"\nHook point: {hook_point}")
-        print(f"Activation shape: {store.raw_activations.shape}")
-        print(f"Number of examples: {len(store.example_indices)}")
-        print(f"Hidden size: {store.hidden_size}")
-
-    return activation_stores
-
-
-def evaluate_probe_accuracy(
-    probe, activation_store, position_key: str = "last"
+def validate_probe_on_split(
+    probe, activation_store, split_indices: List[int], position_key: str = "last"
 ) -> Dict[str, float]:
-    """Evaluate probe accuracy and return metrics."""
+    """Evaluate probe on a specific data split with detailed metrics."""
     X, y = activation_store.get_probe_data(position_key)
 
-    # Move to probe device
-    X = X.to(probe.config.device)
-    y = y.to(probe.config.device)
+    # Select only the specified indices
+    X_split = X[split_indices].to(probe.config.device)
+    y_split = y[split_indices].to(probe.config.device)
 
     with torch.no_grad():
-        predictions = probe(X)
+        predictions = probe(X_split)
 
         # Convert predictions to binary for accuracy calculation
         if predictions.shape[1] == 1:  # Binary classification
             binary_preds = (torch.sigmoid(predictions) > 0.5).float()
-            accuracy = (binary_preds.squeeze() == y.float()).float().mean()
+            accuracy = (binary_preds.squeeze() == y_split.float()).float().mean()
+
+            # Calculate precision, recall, F1
+            tp = ((binary_preds.squeeze() == 1) & (y_split.float() == 1)).sum().float()
+            fp = ((binary_preds.squeeze() == 1) & (y_split.float() == 0)).sum().float()
+            fn = ((binary_preds.squeeze() == 0) & (y_split.float() == 1)).sum().float()
+
+            precision = tp / (tp + fp + 1e-8)
+            recall = tp / (tp + fn + 1e-8)
+            f1 = 2 * (precision * recall) / (precision + recall + 1e-8)
+
         else:  # Multi-class
             binary_preds = torch.argmax(predictions, dim=1)
-            accuracy = (binary_preds == y.long().squeeze()).float().mean()
+            accuracy = (binary_preds == y_split.long().squeeze()).float().mean()
+            precision = recall = f1 = accuracy  # Simplified for multi-class
 
         # Calculate mean prediction confidence
         if predictions.shape[1] == 1:
@@ -116,111 +144,58 @@ def evaluate_probe_accuracy(
 
     return {
         "accuracy": accuracy.item(),
+        "precision": precision.item(),
+        "recall": recall.item(),
+        "f1": f1.item(),
         "confidence": confidence.item(),
-        "num_samples": len(y),
+        "num_samples": len(y_split),
     }
 
 
-def train_linear_probe(
-    activation_stores: Dict[str, any],
-    hook_point: str,
-    hidden_size: int,
-    device: str,
-    save_dir: Optional[str] = None,
-) -> Tuple[LinearProbe, Dict[str, List[float]]]:
-    """Train a linear probe for truthfulness detection."""
-    print(f"\n=== Training Linear Probe on {hook_point} ===")
+def create_validation_splits(
+    dataset_size: int, train_ratio: float = 0.8
+) -> Tuple[List[int], List[int]]:
+    """Create train/validation splits."""
+    indices = list(range(dataset_size))
+    torch.manual_seed(42)  # For reproducible splits
+    shuffled_indices = torch.randperm(dataset_size).tolist()
 
-    # Debug: Check activation store
-    activation_store = activation_stores[hook_point]
-    print(f"Activation store labels shape: {activation_store.labels.shape}")
-    print(f"Raw activations shape: {activation_store.raw_activations.shape}")
-    print(f"Example indices: {activation_store.example_indices}")
+    split_idx = int(dataset_size * train_ratio)
+    train_indices = shuffled_indices[:split_idx]
+    val_indices = shuffled_indices[split_idx:]
 
-    # Test get_probe_data directly
-    try:
-        X, y = activation_store.get_probe_data("last")
-        print(f"Got probe data: X shape {X.shape}, y shape {y.shape}")
-    except Exception as e:
-        print(f"Error getting probe data: {e}")
-        import traceback
-
-        traceback.print_exc()
-        raise
-
-    # Create probe config
-    config = LinearProbeConfig(
-        input_size=hidden_size,
-        device=device,
-        model_name="Qwen/Qwen2.5-0.5B",
-        hook_point=hook_point,
-        name="truthfulness_linear_probe",
-        loss_type="mse",
-        normalize_weights=True,
-        bias=True,
-    )
-
-    # Create probe and trainer
-    probe = LinearProbe(config)
-    trainer_config = SupervisedTrainerConfig(
-        device=device,
-        batch_size=2,  # Small batch for demo
-        num_epochs=20,
-        learning_rate=1e-3,
-        train_ratio=0.8,
-        show_progress=True,
-        standardize_activations=True,
-    )
-    trainer = SupervisedProbeTrainer(trainer_config)
-
-    # Prepare data
-    train_loader, val_loader = trainer.prepare_supervised_data(activation_store, "last")
-    print(f"Created train loader with {len(train_loader)} batches")
-
-    # Train
-    history = trainer.train(probe, train_loader, val_loader)
-
-    # Evaluate
-    metrics = evaluate_probe_accuracy(probe, activation_store, "last")
-    print(
-        f"Linear Probe Results: Accuracy={metrics['accuracy']:.3f}, Confidence={metrics['confidence']:.3f}"
-    )
-
-    # Save if requested
-    if save_dir:
-        os.makedirs(save_dir, exist_ok=True)
-        probe_path = os.path.join(
-            save_dir, f"linear_probe_{hook_point.replace('.', '_')}.pt"
-        )
-        probe.save(probe_path)
-        print(f"Saved linear probe to {probe_path}")
-
-    return probe, history
+    return train_indices, val_indices
 
 
 def train_logistic_probe(
-    activation_stores: Dict[str, any],
+    tokenized_dataset: TokenizedProbingDataset,
     hook_point: str,
     hidden_size: int,
     device: str,
+    model_name: str,
+    val_indices: List[int],
     save_dir: Optional[str] = None,
-) -> Tuple[LogisticProbe, Dict[str, List[float]]]:
-    """Train a logistic probe for truthfulness detection."""
-    print(f"\n=== Training Logistic Probe on {hook_point} ===")
+    hook_point_list: Optional[List[str]] = None,
+) -> Tuple[LogisticProbe, Dict[str, List[float]], Dict[str, float]]:
+    """Train a logistic probe for truthfulness detection using ProbePipeline."""
+    logger.info(f"\n=== Training Logistic Probe on {hook_point} ===")
+
+    # Extract layer number from hook_point
+    layer_num = int(hook_point.split(".")[1]) if "blocks." in hook_point else 0
 
     # Create probe config
-    config = LogisticProbeConfig(
+    probe_config = LogisticProbeConfig(
         input_size=hidden_size,
         device=device,
-        model_name="Qwen/Qwen2.5-0.5B",
+        model_name=model_name,
         hook_point=hook_point,
+        hook_layer=layer_num,
         name="truthfulness_logistic_probe",
         normalize_weights=True,
         bias=True,
     )
 
-    # Create probe and trainer
-    probe = LogisticProbe(config)
+    # Create trainer config
     trainer_config = SupervisedTrainerConfig(
         device=device,
         batch_size=2,  # Small batch for demo
@@ -230,20 +205,41 @@ def train_logistic_probe(
         show_progress=True,
         handle_class_imbalance=True,
         standardize_activations=True,
+        patience=15,
     )
-    trainer = SupervisedProbeTrainer(trainer_config)
 
-    # Prepare data
+    cache_name = (
+        f"./cache/logistic_probe_cache_{hook_point.replace('.', '_')}"
+        if hook_point_list is None
+        else f"./cache/logistic_probe_cache_multiple_hooks"
+    )
+    # Create pipeline config
+    pipeline_config = ProbePipelineConfig(
+        dataset=tokenized_dataset,
+        probe_cls=LogisticProbe,
+        probe_config=probe_config,
+        trainer_cls=SupervisedProbeTrainer,
+        trainer_config=trainer_config,
+        position_key="last",
+        model_name=model_name,
+        hook_points=[hook_point] if hook_point_list is None else hook_point_list,
+        cache_dir=cache_name,
+    )
+
+    # Run pipeline
+    pipeline = ProbePipeline(pipeline_config)
+    probe, history = pipeline.run()
+
+    # Get activation store for validation metrics
+    activation_stores = pipeline.activation_stores
     activation_store = activation_stores[hook_point]
-    train_loader, val_loader = trainer.prepare_supervised_data(activation_store, "last")
 
-    # Train
-    history = trainer.train(probe, train_loader, val_loader)
-
-    # Evaluate
-    metrics = evaluate_probe_accuracy(probe, activation_store, "last")
-    print(
-        f"Logistic Probe Results: Accuracy={metrics['accuracy']:.3f}, Confidence={metrics['confidence']:.3f}"
+    # Evaluate on validation set
+    val_metrics = validate_probe_on_split(probe, activation_store, val_indices, "last")
+    logger.info(
+        f"Logistic Probe Validation Results: Accuracy={val_metrics['accuracy']:.3f}, "
+        f"Precision={val_metrics['precision']:.3f}, Recall={val_metrics['recall']:.3f}, "
+        f"F1={val_metrics['f1']:.3f}, Confidence={val_metrics['confidence']:.3f}"
     )
 
     # Save if requested
@@ -253,233 +249,330 @@ def train_logistic_probe(
             save_dir, f"logistic_probe_{hook_point.replace('.', '_')}.pt"
         )
         probe.save(probe_path)
-        print(f"Saved logistic probe to {probe_path}")
+        logger.info(f"Saved logistic probe to {probe_path}")
 
-    return probe, history
+    return probe, history, val_metrics
 
 
-def train_directional_probes(
-    activation_stores: Dict[str, any],
-    hook_point: str,
-    hidden_size: int,
-    device: str,
-    save_dir: Optional[str] = None,
-) -> Dict[str, Tuple[any, Dict[str, List[float]]]]:
-    """Train directional probes (KMeans, PCA, MeanDiff) for truthfulness detection."""
-    print(f"\n=== Training Directional Probes on {hook_point} ===")
+def test_probes_on_dataset(
+    probe_results: Dict[str, Dict],
+    test_tokenized_dataset: TokenizedProbingDataset,
+    model_name: str,
+    dataset_name: str = "test",
+) -> List[Dict]:
+    """Test trained probes on a dataset and return metrics."""
+    logger.info(f"\n{'='*60}")
+    logger.info(f"TESTING PROBES ON {dataset_name.upper()} DATASET")
+    logger.info(f"{'='*60}")
 
-    results = {}
-    activation_store = activation_stores[hook_point]
+    test_results = []
 
-    # KMeans Probe
-    print("\n--- Training KMeans Probe ---")
-    kmeans_config = KMeansProbeConfig(
-        input_size=hidden_size,
-        device=device,
-        model_name="Qwen/Qwen2.5-0.5B",
-        hook_point=hook_point,
-        name="truthfulness_kmeans_probe",
-        n_clusters=2,
-        normalize_weights=True,
-    )
-    kmeans_probe = KMeansProbe(kmeans_config)
+    for hook_point, results in probe_results.items():
+        layer_num = hook_point.split(".")[1] if "blocks." in hook_point else "unknown"
 
-    trainer_config = DirectionalTrainerConfig(
-        device=device,
-        standardize_activations=True,
-    )
-    trainer = DirectionalProbeTrainer(trainer_config)
+        # Get activation stores for this hook point using pipeline
+        # We'll create a temporary pipeline to get activations for testing
+        from probity.collection.collectors import (
+            TransformerLensCollector,
+            TransformerLensConfig,
+        )
 
-    train_loader, _ = trainer.prepare_supervised_data(activation_store, "last")
-    kmeans_history = trainer.train(kmeans_probe, train_loader)
-    kmeans_metrics = evaluate_probe_accuracy(kmeans_probe, activation_store, "last")
-    print(f"KMeans Probe Results: Accuracy={kmeans_metrics['accuracy']:.3f}")
-    results["kmeans"] = (kmeans_probe, kmeans_history)
+        config = TransformerLensConfig(
+            model_name=model_name,
+            hook_points=[hook_point],
+            batch_size=4,
+            device="cuda" if torch.cuda.is_available() else "cpu",
+        )
+        collector = TransformerLensCollector(config)
+        activation_stores = collector.collect(test_tokenized_dataset)
+        activation_store = activation_stores[hook_point]
 
-    # PCA Probe
-    print("\n--- Training PCA Probe ---")
-    pca_config = PCAProbeConfig(
-        input_size=hidden_size,
-        device=device,
-        model_name="Qwen/Qwen2.5-0.5B",
-        hook_point=hook_point,
-        name="truthfulness_pca_probe",
-        n_components=1,
-        normalize_weights=True,
-    )
-    pca_probe = PCAProbe(pca_config)
+        for probe_type, (probe, history, _) in results.items():
+            # Get all data indices for testing
+            dataset_size = len(activation_store.example_indices)
+            test_indices = list(range(dataset_size))
 
-    pca_history = trainer.train(pca_probe, train_loader)
-    pca_metrics = evaluate_probe_accuracy(pca_probe, activation_store, "last")
-    print(f"PCA Probe Results: Accuracy={pca_metrics['accuracy']:.3f}")
-    results["pca"] = (pca_probe, pca_history)
-
-    # Mean Difference Probe
-    print("\n--- Training Mean Difference Probe ---")
-    meandiff_config = MeanDiffProbeConfig(
-        input_size=hidden_size,
-        device=device,
-        model_name="Qwen/Qwen2.5-0.5B",
-        hook_point=hook_point,
-        name="truthfulness_meandiff_probe",
-        normalize_weights=True,
-    )
-    meandiff_probe = MeanDifferenceProbe(meandiff_config)
-
-    meandiff_history = trainer.train(meandiff_probe, train_loader)
-    meandiff_metrics = evaluate_probe_accuracy(meandiff_probe, activation_store, "last")
-    print(f"Mean Difference Probe Results: Accuracy={meandiff_metrics['accuracy']:.3f}")
-    results["meandiff"] = (meandiff_probe, meandiff_history)
-
-    # Save probes if requested
-    if save_dir:
-        os.makedirs(save_dir, exist_ok=True)
-        for probe_type, (probe, _) in results.items():
-            probe_path = os.path.join(
-                save_dir, f"{probe_type}_probe_{hook_point.replace('.', '_')}.pt"
+            # Evaluate probe on test dataset
+            test_metrics = validate_probe_on_split(
+                probe, activation_store, test_indices, "last"
             )
-            probe.save(probe_path)
-            print(f"Saved {probe_type} probe to {probe_path}")
 
-    return results
+            result = {
+                "dataset": dataset_name,
+                "layer": layer_num,
+                "hook_point": hook_point,
+                "probe_type": probe_type,
+                "accuracy": test_metrics["accuracy"],
+                "precision": test_metrics["precision"],
+                "recall": test_metrics["recall"],
+                "f1": test_metrics["f1"],
+                "confidence": test_metrics["confidence"],
+                "num_samples": test_metrics["num_samples"],
+            }
+            test_results.append(result)
+
+            logger.info(
+                f"Layer {layer_num} {probe_type}: Acc={test_metrics['accuracy']:.3f}, "
+                f"F1={test_metrics['f1']:.3f}, Samples={test_metrics['num_samples']}"
+            )
+
+    return test_results
+
+
+def compare_layer_performance(
+    probe_results: Dict[str, Dict], dataset_name: str = "validation"
+) -> List[Dict]:
+    """Compare performance across different model layers and return results."""
+    logger.info(f"\n{'='*60}")
+    logger.info(f"LAYER PERFORMANCE COMPARISON - {dataset_name.upper()}")
+    logger.info(f"{'='*60}")
+
+    # Create performance summary table
+    performance_data = []
+    for hook_point, results in probe_results.items():
+        layer_num = hook_point.split(".")[1] if "blocks." in hook_point else "unknown"
+
+        for probe_type, (probe, history, val_metrics) in results.items():
+            performance_data.append(
+                {
+                    "dataset": dataset_name,
+                    "layer": layer_num,
+                    "hook_point": hook_point,
+                    "probe_type": probe_type,
+                    "accuracy": val_metrics["accuracy"],
+                    "precision": val_metrics["precision"],
+                    "recall": val_metrics["recall"],
+                    "f1": val_metrics["f1"],
+                    "confidence": val_metrics["confidence"],
+                    "num_samples": val_metrics["num_samples"],
+                }
+            )
+
+    # Sort by layer number and probe type
+    performance_data.sort(
+        key=lambda x: (
+            int(x["layer"]) if x["layer"].isdigit() else 999,
+            x["probe_type"],
+        )
+    )
+
+    # Print formatted table
+    logger.info(
+        f"\n{'Layer':<6} {'Hook Point':<25} {'Probe':<10} {'Acc':<6} {'Prec':<6} {'Rec':<6} {'F1':<6} {'Conf':<6}"
+    )
+    logger.info("-" * 75)
+
+    for data in performance_data:
+        logger.info(
+            f"{data['layer']:<6} {data['hook_point']:<25} {data['probe_type']:<10} "
+            f"{data['accuracy']:<6.3f} {data['precision']:<6.3f} {data['recall']:<6.3f} "
+            f"{data['f1']:<6.3f} {data['confidence']:<6.3f}"
+        )
+
+    # Find best performing layer/probe combinations
+    best_accuracy = max(performance_data, key=lambda x: x["accuracy"])
+    best_f1 = max(performance_data, key=lambda x: x["f1"])
+
+    logger.info(f"\n{'='*60}")
+    logger.info("BEST PERFORMANCE:")
+    logger.info(
+        f"Highest Accuracy: {best_accuracy['accuracy']:.3f} (Layer {best_accuracy['layer']}, {best_accuracy['probe_type']} probe)"
+    )
+    logger.info(
+        f"Highest F1 Score: {best_f1['f1']:.3f} (Layer {best_f1['layer']}, {best_f1['probe_type']} probe)"
+    )
+    logger.info(f"{'='*60}")
+
+    return performance_data
+
+
+def load_dataset(dataset_name: str = "roleplaying"):
+    """Load a dataset by name for easy switching between test datasets.
+
+    Args:
+        dataset_name: Name of the dataset to load. Options:
+            - "repe_honesty": REPE honesty dataset (you_are_fact_sys variant)
+            - "roleplaying": Roleplaying dataset (offpolicy_train variant)
+
+    Returns:
+        Tuple of (texts_with_labels, dataset_id)
+    """
+    repo = DatasetRepository()
+
+    if dataset_name == "repe_honesty":
+        dataset_id = "repe_honesty__you_are_fact_sys"
+    elif dataset_name == "roleplaying":
+        dataset_id = "roleplaying__plain"
+    else:
+        raise ValueError(
+            f"Unknown dataset name: {dataset_name}. Options: 'repe_honesty', 'roleplaying'"
+        )
+
+    model_name = "prewritten"
+    dataset = repo.get(dataset_id, model=model_name)
+
+    logger.info(f"Successfully loaded dataset '{dataset_id}'.")
+    logger.info(f"Dataset size: {len(dataset.dialogues)} dialogues")
+
+    texts_with_labels = list(zip(dataset.dialogues, dataset.labels))
+    return texts_with_labels, dataset_id
+
+
+def save_results_to_csv(results: List[Dict], filename: str = "results.csv"):
+    """Save results to CSV file."""
+    if not results:
+        logger.warning("No results to save")
+        return
+
+    logger.info(f"Saving results to {filename}...")
+
+    # Create DataFrame and save to CSV
+    df = pd.DataFrame(results)
+    df.to_csv(filename, index=False)
+
+    logger.info(f"Results saved to {filename} with {len(results)} rows")
+    logger.info(f"Columns: {', '.join(df.columns)}")
+
+
+def prepare_dataset_for_testing(
+    texts_with_labels: List[Tuple[str, bool]],
+    tokenizer,
+    config,
+    dataset_id: str,
+) -> TokenizedProbingDataset:
+    """Prepare a dataset for testing by tokenizing (pipelines will handle activation extraction)."""
+    base_dataset = create_simple_dataset(texts_with_labels)
+
+    tokenized_dataset = TokenizedProbingDataset.from_probing_dataset(
+        dataset=base_dataset,
+        tokenizer=tokenizer,
+        padding="max_length",
+        max_length=128,
+        truncation=True,
+    )
+
+    # Add 'last' token positions to each example manually
+    for i, example in enumerate(tokenized_dataset.examples):
+        if example.attention_mask:
+            last_pos = sum(example.attention_mask) - 1
+        else:
+            last_pos = len(example.tokens) - 1
+
+        if example.token_positions is None:
+            example.token_positions = TokenPositions(positions={})
+
+        example.token_positions.positions["last"] = last_pos
+
+    return tokenized_dataset
 
 
 def main():
-    """Main function to demonstrate Qwen usage with probity."""
-    print("SPAR - Qwen 0.6B with Probity Collection")
-    print("=" * 50)
+    """Main function to train on repe_honesty, validate, and test on roleplaying."""
+    logger.info("SPAR - Training on REPE Honesty, Testing on Roleplaying")
+
+    all_results = []
 
     try:
-        # Create sample dataset for demonstration
-        sample_texts = [
-            ("I am telling the truth about this matter.", True),
-            ("The weather today is quite pleasant.", True),
-            ("This statement is completely false and misleading.", False),
-            ("The cat is sleeping on the windowsill.", True),
-        ]
+        # --- 1. Load REPE Honesty dataset for training/validation ---
+        logger.info("--- Loading REPE Honesty dataset for training/validation ---")
+        train_texts, train_dataset_id = load_dataset("repe_honesty")
 
-        base_dataset = create_simple_dataset(sample_texts)
-
-        # Setup collector
+        # --- 2. Setup collector and tokenizer ---
         collector, config = setup_collector()
-
-        # Create tokenized dataset
         tokenizer = AutoTokenizer.from_pretrained(config.model_name)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
-        tokenized_dataset = TokenizedProbingDataset.from_probing_dataset(
-            dataset=base_dataset, tokenizer=tokenizer
+        # --- 3. Prepare training dataset ---
+        train_tokenized_dataset = prepare_dataset_for_testing(
+            train_texts, tokenizer, config, train_dataset_id
         )
 
-        # Add 'last' token positions to each example manually
-        print("Adding 'last' token positions to examples...")
-        for i, example in enumerate(tokenized_dataset.examples):
-            if example.attention_mask:
-                # Find the last non-padding token
-                last_pos = sum(example.attention_mask) - 1
-            else:
-                # If no attention mask, assume last token is last position
-                last_pos = len(example.tokens) - 1
-
-            # Create token_positions if it doesn't exist
-            if example.token_positions is None:
-                from probity.datasets.tokenized import TokenPositions
-
-                example.token_positions = TokenPositions(positions={})
-
-            example.token_positions.positions["last"] = last_pos
-            print(
-                f"Example {i}: Set last position to {last_pos} (seq_len: {len(example.tokens)})"
-            )
-
-        # Extract activations using probity
-        activation_stores = extract_activations_with_probity(
-            collector, tokenized_dataset
+        # --- 4. Create train/validation splits ---
+        logger.info("\n--- Creating train/validation splits ---")
+        dataset_size = len(train_tokenized_dataset.examples)
+        train_indices, val_indices = create_validation_splits(
+            dataset_size, train_ratio=0.8
+        )
+        logger.info(
+            f"Dataset split: {len(train_indices)} train, {len(val_indices)} validation examples"
         )
 
-        # Print activation info
-        for hook_point, store in activation_stores.items():
-            first_seq_len = store.sequence_lengths[0].item()
-            first_example_activations = store.raw_activations[
-                0, first_seq_len - 1, :
-            ]  # Last token
-            print(
-                f"  First example last token shape: {first_example_activations.shape}"
-            )
-            print(f"  Sequence length: {first_seq_len}")
-            print(f"  Mean activation: {first_example_activations.mean():.4f}")
-            print(f"  Std activation: {first_example_activations.std():.4f}")
+        logger.info("TRAINING PROBES ON REPE HONESTY DATASET")
 
-        print("\n" + "=" * 60)
-        print("TRAINING PROBES FOR TRUTHFULNESS DETECTION")
-        print("=" * 60)
-
-        # Get device and hidden size from config
         device = config.device
-
-        # Train probes for each hook point
         all_probe_results = {}
-        save_dir = "./probe_checkpoints"  # Directory to save trained probes
+        save_dir = "./probe_checkpoints"
 
-        for hook_point, store in activation_stores.items():
-            hidden_size = store.hidden_size
-            print(f"\n{'='*40}")
-            print(f"TRAINING PROBES FOR {hook_point}")
-            print(f"Hidden size: {hidden_size}, Device: {device}")
-            print(f"{'='*40}")
+        # Get model config to determine hidden size
+        model_config = AutoConfig.from_pretrained(config.model_name)
+        hidden_size = model_config.hidden_size
+
+        for hook_point in config.hook_points:
+            logger.info(f"\n{'='*40}")
+            logger.info(f"TRAINING PROBES FOR {hook_point}")
+            logger.info(f"Hidden size: {hidden_size}, Device: {device}")
+            logger.info(f"{'='*40}")
 
             hook_results = {}
-
-            # Train Linear Probe
             try:
-                linear_probe, linear_history = train_linear_probe(
-                    activation_stores, hook_point, hidden_size, device, save_dir
+                # --- Train Logistic Probe ---
+                logistic_probe, logistic_history, logistic_val_metrics = (
+                    train_logistic_probe(
+                        train_tokenized_dataset,
+                        hook_point,
+                        hidden_size,
+                        device,
+                        config.model_name,
+                        val_indices,
+                        save_dir,
+                        # hook_point_list=config.hook_points,
+                    )
                 )
-                hook_results["linear"] = (linear_probe, linear_history)
-            except Exception as e:
-                print(f"Error training linear probe: {e}")
-                import traceback
 
-                traceback.print_exc()
-
-            # Train Logistic Probe
-            try:
-                logistic_probe, logistic_history = train_logistic_probe(
-                    activation_stores, hook_point, hidden_size, device, save_dir
+                hook_results["logistic"] = (
+                    logistic_probe,
+                    logistic_history,
+                    logistic_val_metrics,
                 )
-                hook_results["logistic"] = (logistic_probe, logistic_history)
             except Exception as e:
-                print(f"Error training logistic probe: {e}")
-                import traceback
+                logger.error(
+                    f"Error training probes for hook point {hook_point}: {e}",
+                    exc_info=True,
+                )
+                continue
 
-                traceback.print_exc()
+            all_probe_results[hook_point] = hook_results
 
-        # Print final summary
-        print("\n" + "=" * 60)
-        print("PROBE TRAINING SUMMARY")
-        print("=" * 60)
+        validation_results = compare_layer_performance(all_probe_results, "validation")
+        all_results.extend(validation_results)
 
-        for hook_point, hook_results in all_probe_results.items():
-            print(f"\n{hook_point}:")
-            for probe_type, (probe, history) in hook_results.items():
-                if history and "train_loss" in history and history["train_loss"]:
-                    final_loss = history["train_loss"][-1]
-                    print(f"  {probe_type:12} - Final Loss: {final_loss:.4f}")
-                else:
-                    print(f"  {probe_type:12} - No training history available")
+        test_texts, test_dataset_id = load_dataset("roleplaying")
 
-        print(f"\nAll probes saved to: {save_dir}")
-        print("\nProbe training complete! You can now use these probes for inference.")
-        print("Try loading a probe with: probe = LinearProbe.load('path/to/probe.pt')")
+        test_tokenized_dataset = prepare_dataset_for_testing(
+            test_texts, tokenizer, config, test_dataset_id
+        )
+
+        test_results = test_probes_on_dataset(
+            all_probe_results, test_tokenized_dataset, config.model_name, "test"
+        )
+        all_results.extend(test_results)
+
+        save_results_to_csv(all_results, "results.csv")
+
+        logger.info("\n" + "=" * 60)
+        logger.info("EXPERIMENT COMPLETE")
+        logger.info("=" * 60)
+        logger.info(f"Training dataset: REPE Honesty ({len(train_texts)} samples)")
+        logger.info(f"Test dataset: Roleplaying ({len(test_texts)} samples)")
+        logger.info(f"Results saved to: results.csv ({len(all_results)} rows)")
+        logger.info("=" * 60)
 
     except Exception as e:
-        print(f"Error: {e}")
-        print("Make sure you have probity and dependencies installed:")
-        print("pip install -e /path/to/probity")
-        import traceback
-
-        traceback.print_exc()
+        logger.error(
+            f"An unexpected error occurred in the main process: {e}",
+            exc_info=True,
+        )
 
 
 if __name__ == "__main__":

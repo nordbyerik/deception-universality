@@ -2,23 +2,25 @@ import os
 import torch
 from dataclasses import dataclass
 from typing import Callable, List, Tuple
-from probity.datasets.tokenized import TokenizedProbingDataset
+from probity.datasets.tokenized import TokenPositions, TokenizedProbingDataset
+import pickle as pkl
+import json
 
 @dataclass
 class ActivationStore:
     """Stores and provides access to model activations."""
-    
+
     # Core storage
     raw_activations: torch.Tensor  # Shape: (num_examples, seq_len, hidden_size)
     hook_point: str  # Which part of model these came from
-    
+
     # Dataset information
     labels: torch.Tensor  # Shape: (num_examples,) numeric labels
     label_texts: List[str]  # Original text labels
     example_indices: torch.Tensor  # Shape: (num_examples,) maps to dataset indices
     sequence_lengths: torch.Tensor  # Shape: (num_examples,) actual lengths before padding
     hidden_size: int
-    
+
     # Keep reference to original dataset for position lookups
     dataset: TokenizedProbingDataset
 
@@ -50,7 +52,7 @@ class ActivationStore:
                     positions.append(self.raw_activations[idx, pos])
                 else:  # List[int]
                     positions.extend([self.raw_activations[idx, p] for p in pos])
-        
+
         return torch.stack(positions)
 
     def get_activations_by_fn(self, position_fn: Callable) -> torch.Tensor:
@@ -64,7 +66,6 @@ class ActivationStore:
         """
         # Stub for now
         raise NotImplementedError
-    
 
     def get_probe_data(self, position_key: str) -> Tuple[torch.Tensor, torch.Tensor]:
         """Get activations and labels formatted for probe training.
@@ -79,7 +80,7 @@ class ActivationStore:
               Labels are repeated for examples with multiple positions
         """
         activations = self.get_position_activations(position_key)
-        
+
         # Handle label replication for multiple positions
         if len(activations) > len(self.labels):
             # Count positions per example to know how many times to repeat each label
@@ -91,7 +92,7 @@ class ActivationStore:
             labels = torch.repeat_interleave(self.labels, torch.tensor(position_counts))
         else:
             labels = self.labels
-            
+
         return activations, labels
 
     def save(self, path: str) -> None:
@@ -106,16 +107,30 @@ class ActivationStore:
             'sequence_lengths': self.sequence_lengths,
             'hidden_size': self.hidden_size
         }, os.path.join(path, 'cache.pt'))
-        
+
         # Save dataset separately since it contains complex objects
         self.dataset.save(os.path.join(path, 'dataset'))
+
+        token_positions = {}
+        for example in self.dataset.examples:
+            token_positions[example.text] = example.token_positions.positions
+        with open(os.path.join(path, "token_positions.json"), "w") as f:
+            json.dump(token_positions, f)
 
     @classmethod
     def load(cls, path: str) -> 'ActivationStore':
         """Load cache from disk."""
         cache_data = torch.load(os.path.join(path, 'cache.pt'))
         dataset = TokenizedProbingDataset.load(os.path.join(path, 'dataset'))
-        
+
+        with open(os.path.join(path, "token_positions.json"), "r") as f:
+            token_positions = json.load(f)
+
+        for example in dataset.examples:
+            example.token_positions = TokenPositions(
+                positions=token_positions.get(example.text, [])
+            )
+
         return cls(
             dataset=dataset,
             **cache_data
