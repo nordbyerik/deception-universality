@@ -49,60 +49,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-def create_simple_dataset(texts_with_labels: List[Tuple[str, bool]]) -> ProbingDataset:
-    """Create a simple probing dataset from text-label pairs."""
-    examples = []
-    for dialogue, label in texts_with_labels:
-        # Convert dialogue to string using dialogue_to_string with qwen format
-        text = dialogue_to_string(dialogue, "qwen")
-        example = ProbingExample(
-            text=text,
-            label=1 if "deceptive" in label.value else 0,  # Convert boolean to int
-            label_text=str(label),
-        )
-        examples.append(example)
-
-    return ProbingDataset(examples=examples, task_type="classification")
-
-
-def setup_collector(
-    model_name: str = "Qwen/Qwen2.5-3B",
-) -> Tuple[TransformerLensCollector, TransformerLensConfig]:
-    """Setup the probity collector for activation extraction."""
-    # Get model config to determine number of layers
-    model_config = AutoConfig.from_pretrained(model_name)
-    num_layers = model_config.num_hidden_layers
-    logger.info(f"Model {model_name} has {num_layers} layers")
-
-    if num_layers <= 10:
-        layer_indices = list(range(num_layers))
-    else:
-        layer_indices = [0, num_layers - 1]
-
-        if num_layers > 2:
-            middle_layers = np.linspace(
-                1, num_layers - 2, min(8, num_layers - 2), dtype=int
-            )
-            layer_indices.extend(middle_layers.tolist())
-
-        layer_indices = sorted(list(set(layer_indices)))
-
-    hook_points = [f"blocks.{i}.hook_resid_post" for i in layer_indices]
-
-    logger.info(f"Selected layers: {layer_indices}")
-    logger.info(f"Hook points: {hook_points}")
-
-    config = TransformerLensConfig(
-        model_name=model_name,
-        hook_points=hook_points,
-        batch_size=1,  # Reduced to 1 to avoid OOM
-        device="cuda" if torch.cuda.is_available() else "cpu",
-    )
-
-    collector = TransformerLensCollector(config)
-
-    return collector, config
-
 
 def validate_probe_on_split(
     probe, activation_store, split_indices: List[int], position_key: str = "last"
@@ -266,25 +212,44 @@ def test_probes_on_dataset(
     logger.info(f"{'='*60}")
 
     test_results = []
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     for hook_point, results in probe_results.items():
         layer_num = hook_point.split(".")[1] if "blocks." in hook_point else "unknown"
 
-        # Get activation stores for this hook point using pipeline
-        # We'll create a temporary pipeline to get activations for testing
-        from probity.collection.collectors import (
-            TransformerLensCollector,
-            TransformerLensConfig,
+        # Create a minimal pipeline config just to use _load_or_collect_activations
+        # This will reuse the model and handle caching properly
+        dummy_probe_config = LogisticProbeConfig(
+            input_size=1,  # Dummy value, not used for collection
+            device=device,
+            model_name=model_name,
+            hook_point=hook_point,
+            hook_layer=int(layer_num) if layer_num.isdigit() else 0,
+            name="test_probe",
         )
 
-        config = TransformerLensConfig(
+        dummy_trainer_config = SupervisedTrainerConfig(
+            device=device,
+            batch_size=1,
+        )
+
+        cache_name = f"./cache/{model_name.replace('.', '_').replace('/', '_')}/test_cache_{hook_point.replace('.', '_')}"
+
+        pipeline_config = ProbePipelineConfig(
+            dataset=test_tokenized_dataset,
+            probe_cls=LogisticProbe,
+            probe_config=dummy_probe_config,
+            trainer_cls=SupervisedProbeTrainer,
+            trainer_config=dummy_trainer_config,
+            position_key="last",
             model_name=model_name,
             hook_points=[hook_point],
-            batch_size=1,  # Reduced to 1 to avoid OOM
-            device="cuda" if torch.cuda.is_available() else "cpu",
+            cache_dir=cache_name,
         )
-        collector = TransformerLensCollector(config)
-        activation_stores = collector.collect(test_tokenized_dataset)
+
+        # Create pipeline and get activations (with caching)
+        pipeline = ProbePipeline(pipeline_config)
+        activation_stores = pipeline._load_or_collect_activations()
         activation_store = activation_stores[hook_point]
 
         for probe_type, (probe, history, _) in results.items():
@@ -319,6 +284,17 @@ def test_probes_on_dataset(
                 f"Layer {layer_num} {probe_type}: Acc={test_metrics['accuracy']:.3f}, "
                 f"F1={test_metrics['f1']:.3f}, Samples={test_metrics['num_samples']}"
             )
+
+        # Clean up pipeline and model after processing this hook point
+        if hasattr(pipeline, 'collector') and hasattr(pipeline.collector, 'model'):
+            pipeline.collector.model.to('cpu')
+            del pipeline.collector.model
+            del pipeline.collector
+        del pipeline
+        del activation_stores
+        del activation_store
+        torch.cuda.empty_cache()
+        logger.info(f"Cleaned up model after testing layer {layer_num}")
 
     return test_results
 
@@ -445,7 +421,18 @@ def prepare_dataset_for_testing(
     dataset_id: str = "",
 ) -> TokenizedProbingDataset:
     """Prepare a dataset for testing by tokenizing (pipelines will handle activation extraction)."""
-    base_dataset = create_simple_dataset(texts_with_labels)
+    examples = []
+    for dialogue, label in texts_with_labels:
+        # Convert dialogue to string using dialogue_to_string with qwen format
+        text = dialogue_to_string(dialogue, "qwen")
+        example = ProbingExample(
+            text=text,
+            label=1 if "deceptive" in label.value else 0,  # Convert boolean to int
+            label_text=str(label),
+        )
+        examples.append(example)
+
+    base_dataset = ProbingDataset(examples=examples, task_type="classification")
 
     tokenized_dataset = TokenizedProbingDataset.from_probing_dataset(
         dataset=base_dataset,
@@ -482,7 +469,7 @@ def main():
         train_texts, train_dataset_id = load_dataset("repe_honesty")
 
         # --- 2. Setup model config and tokenizer ---
-        model_name = "Qwen/Qwen2.5-3B"
+        model_name = "Qwen/Qwen2.5-7B"
         model_config = AutoConfig.from_pretrained(model_name)
         num_layers = model_config.num_hidden_layers
         logger.info(f"Model {model_name} has {num_layers} layers")
@@ -591,7 +578,7 @@ def main():
         test_results = test_probes_on_dataset(
             all_probe_results, test_tokenized_dataset, model_name, "test"
         )
-        # all_results.extend(test_results)
+        all_results.extend(test_results)
 
         save_results_to_csv(all_results, "results.csv")
 

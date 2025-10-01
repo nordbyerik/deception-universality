@@ -19,4 +19,5 @@ dependencies = [
     "python-dotenv>=1.1.1",
     "fire>=0.7.1",
     "peft>=0.17.1",
+    "matplotlib>=3.10.6",
 ]

@@ -3,12 +3,12 @@ import torch.nn as nn
 from typing import Optional
 
 from .base import BaseProbe
-from .config import LogisticProbeConfig, MultiClassLogisticProbeConfig
+from .config import ProbeConfig, MultiClassLogisticProbeConfig
 
-class MLPProbeConfig(BaseProbeConfig):
+class MLPProbeConfig(ProbeConfig):
     """Configuration for MLP probe."""
-    hidden_size: int = 128
-    num_hidden_layers: int = 1
+    hidden_size: int = 64
+    num_hidden_layers: int = 2
     activation: str = "relu"  # "relu", "gelu", "tanh"
     dropout: float = 0.0
     
