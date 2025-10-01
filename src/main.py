@@ -66,7 +66,7 @@ def create_simple_dataset(texts_with_labels: List[Tuple[str, bool]]) -> ProbingD
 
 
 def setup_collector(
-    model_name: str = "Qwen/Qwen2.5-0.5B",
+    model_name: str = "Qwen/Qwen2.5-3B",
 ) -> Tuple[TransformerLensCollector, TransformerLensConfig]:
     """Setup the probity collector for activation extraction."""
     # Get model config to determine number of layers
@@ -95,7 +95,7 @@ def setup_collector(
     config = TransformerLensConfig(
         model_name=model_name,
         hook_points=hook_points,
-        batch_size=4,  # Small batch size for demo
+        batch_size=1,  # Reduced to 1 to avoid OOM
         device="cuda" if torch.cuda.is_available() else "cpu",
     )
 
@@ -176,7 +176,7 @@ def train_logistic_probe(
     val_indices: List[int],
     save_dir: Optional[str] = None,
     hook_point_list: Optional[List[str]] = None,
-) -> Tuple[LogisticProbe, Dict[str, List[float]], Dict[str, float]]:
+) -> Tuple[LogisticProbe, Dict[str, List[float]], Dict[str, float], 'ProbePipeline']:
     """Train a logistic probe for truthfulness detection using ProbePipeline."""
     logger.info(f"\n=== Training Logistic Probe on {hook_point} ===")
 
@@ -198,7 +198,7 @@ def train_logistic_probe(
     # Create trainer config
     trainer_config = SupervisedTrainerConfig(
         device=device,
-        batch_size=2,  # Small batch for demo
+        batch_size=1,  # Reduced to 1 to avoid OOM
         num_epochs=25,
         learning_rate=1e-3,
         train_ratio=0.8,
@@ -209,9 +209,9 @@ def train_logistic_probe(
     )
 
     cache_name = (
-        f"./cache/logistic_probe_cache_{hook_point.replace('.', '_')}"
+        f"./cache/{model_name.replace('.', '_')}/logistic_probe_cache_{hook_point.replace('.', '_')}"
         if hook_point_list is None
-        else f"./cache/logistic_probe_cache_multiple_hooks"
+        else f"./cache/{model_name.replace('.', '_')}/logistic_probe_cache_multiple_hooks"
     )
     # Create pipeline config
     pipeline_config = ProbePipelineConfig(
@@ -251,7 +251,7 @@ def train_logistic_probe(
         probe.save(probe_path)
         logger.info(f"Saved logistic probe to {probe_path}")
 
-    return probe, history, val_metrics
+    return probe, history, val_metrics, pipeline
 
 
 def test_probes_on_dataset(
@@ -280,7 +280,7 @@ def test_probes_on_dataset(
         config = TransformerLensConfig(
             model_name=model_name,
             hook_points=[hook_point],
-            batch_size=4,
+            batch_size=1,  # Reduced to 1 to avoid OOM
             device="cuda" if torch.cuda.is_available() else "cpu",
         )
         collector = TransformerLensCollector(config)
@@ -296,6 +296,10 @@ def test_probes_on_dataset(
             test_metrics = validate_probe_on_split(
                 probe, activation_store, test_indices, "last"
             )
+
+            # Move probe to CPU and clear cache to free GPU memory
+            probe.to('cpu')
+            torch.cuda.empty_cache()
 
             result = {
                 "dataset": dataset_name,
@@ -437,8 +441,8 @@ def save_results_to_csv(results: List[Dict], filename: str = "results.csv"):
 def prepare_dataset_for_testing(
     texts_with_labels: List[Tuple[str, bool]],
     tokenizer,
-    config,
-    dataset_id: str,
+    config=None,
+    dataset_id: str = "",
 ) -> TokenizedProbingDataset:
     """Prepare a dataset for testing by tokenizing (pipelines will handle activation extraction)."""
     base_dataset = create_simple_dataset(texts_with_labels)
@@ -477,15 +481,37 @@ def main():
         logger.info("--- Loading REPE Honesty dataset for training/validation ---")
         train_texts, train_dataset_id = load_dataset("repe_honesty")
 
-        # --- 2. Setup collector and tokenizer ---
-        collector, config = setup_collector()
-        tokenizer = AutoTokenizer.from_pretrained(config.model_name)
+        # --- 2. Setup model config and tokenizer ---
+        model_name = "Qwen/Qwen2.5-3B"
+        model_config = AutoConfig.from_pretrained(model_name)
+        num_layers = model_config.num_hidden_layers
+        logger.info(f"Model {model_name} has {num_layers} layers")
+
+        # Determine which layers to use
+        if num_layers <= 10:
+            layer_indices = list(range(num_layers))
+        else:
+            layer_indices = [0, num_layers - 1]
+            if num_layers > 2:
+                middle_layers = np.linspace(
+                    1, num_layers - 2, min(8, num_layers - 2), dtype=int
+                )
+                layer_indices.extend(middle_layers.tolist())
+            layer_indices = sorted(list(set(layer_indices)))
+
+        hook_points = [f"blocks.{i}.hook_resid_post" for i in layer_indices]
+        logger.info(f"Selected layers: {layer_indices}")
+        logger.info(f"Hook points: {hook_points}")
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
         # --- 3. Prepare training dataset ---
         train_tokenized_dataset = prepare_dataset_for_testing(
-            train_texts, tokenizer, config, train_dataset_id
+            train_texts, tokenizer, None, train_dataset_id
         )
 
         # --- 4. Create train/validation splits ---
@@ -500,15 +526,12 @@ def main():
 
         logger.info("TRAINING PROBES ON REPE HONESTY DATASET")
 
-        device = config.device
         all_probe_results = {}
         save_dir = "./probe_checkpoints"
 
-        # Get model config to determine hidden size
-        model_config = AutoConfig.from_pretrained(config.model_name)
         hidden_size = model_config.hidden_size
 
-        for hook_point in config.hook_points:
+        for hook_point in hook_points:
             logger.info(f"\n{'='*40}")
             logger.info(f"TRAINING PROBES FOR {hook_point}")
             logger.info(f"Hidden size: {hidden_size}, Device: {device}")
@@ -517,13 +540,13 @@ def main():
             hook_results = {}
             try:
                 # --- Train Logistic Probe ---
-                logistic_probe, logistic_history, logistic_val_metrics = (
+                logistic_probe, logistic_history, logistic_val_metrics, pipeline = (
                     train_logistic_probe(
                         train_tokenized_dataset,
                         hook_point,
                         hidden_size,
                         device,
-                        config.model_name,
+                        model_name,
                         val_indices,
                         save_dir,
                         # hook_point_list=config.hook_points,
@@ -535,6 +558,15 @@ def main():
                     logistic_history,
                     logistic_val_metrics,
                 )
+
+                # Clean up the model from GPU memory after training
+                if hasattr(pipeline, 'collector') and hasattr(pipeline.collector, 'model'):
+                    pipeline.collector.model.to('cpu')
+                    del pipeline.collector.model
+                    del pipeline.collector
+                del pipeline
+                torch.cuda.empty_cache()
+                logger.info(f"Cleaned up model for {hook_point}")
             except Exception as e:
                 logger.error(
                     f"Error training probes for hook point {hook_point}: {e}",
@@ -544,19 +576,22 @@ def main():
 
             all_probe_results[hook_point] = hook_results
 
+            # Clear CUDA cache after each hook point to avoid OOM
+            torch.cuda.empty_cache()
+
         validation_results = compare_layer_performance(all_probe_results, "validation")
         all_results.extend(validation_results)
 
         test_texts, test_dataset_id = load_dataset("roleplaying")
 
         test_tokenized_dataset = prepare_dataset_for_testing(
-            test_texts, tokenizer, config, test_dataset_id
+            test_texts, tokenizer, None, test_dataset_id
         )
 
         test_results = test_probes_on_dataset(
-            all_probe_results, test_tokenized_dataset, config.model_name, "test"
+            all_probe_results, test_tokenized_dataset, model_name, "test"
         )
-        all_results.extend(test_results)
+        # all_results.extend(test_results)
 
         save_results_to_csv(all_results, "results.csv")
 
@@ -576,4 +611,5 @@ def main():
 
 
 if __name__ == "__main__":
+    torch.cuda.empty_cache()
     main()
