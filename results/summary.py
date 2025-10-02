@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
 
-def plot_probe_performance(csv_file, output_prefix='probe'):
+def plot_probe_performance(csv_file, output_prefix='probe', return_summary=False):
     """
     Create 4 separate line plots for logistic probe performance across layers.
     
@@ -12,6 +12,8 @@ def plot_probe_performance(csv_file, output_prefix='probe'):
         Path to the CSV file containing the results
     output_prefix : str
         Prefix for output PNG files (default: 'probe')
+    return_summary : bool
+        If True, return summary statistics as a dictionary
     """
     
     # Load the data
@@ -41,7 +43,7 @@ def plot_probe_performance(csv_file, output_prefix='probe'):
     plt.ylim(0, 1.05)
     plt.tight_layout()
     plt.savefig(f'{output_prefix}_accuracy.png', dpi=300, bbox_inches='tight')
-    plt.show()
+    plt.close()
     
     # Plot 2: F1 Score
     plt.figure(figsize=(10, 6))
@@ -59,7 +61,7 @@ def plot_probe_performance(csv_file, output_prefix='probe'):
     plt.ylim(0, 1.05)
     plt.tight_layout()
     plt.savefig(f'{output_prefix}_f1.png', dpi=300, bbox_inches='tight')
-    plt.show()
+    plt.close()
     
     # Plot 3: Confidence
     plt.figure(figsize=(10, 6))
@@ -77,7 +79,7 @@ def plot_probe_performance(csv_file, output_prefix='probe'):
     plt.ylim(0, 1.05)
     plt.tight_layout()
     plt.savefig(f'{output_prefix}_confidence.png', dpi=300, bbox_inches='tight')
-    plt.show()
+    plt.close()
     
     # Plot 4: All metrics for test set
     plt.figure(figsize=(12, 6))
@@ -104,50 +106,115 @@ def plot_probe_performance(csv_file, output_prefix='probe'):
     plt.ylim(0, 1.05)
     plt.tight_layout()
     plt.savefig(f'{output_prefix}_all_metrics.png', dpi=300, bbox_inches='tight')
-    plt.show()
+    plt.close()
+    
+    # Calculate summary statistics
+    best_val_layer = validation.loc[validation['accuracy'].idxmax(), 'layer']
+    best_val_acc = validation['accuracy'].max()
+    best_test_layer = test.loc[test['accuracy'].idxmax(), 'layer']
+    best_test_acc = test['accuracy'].max()
+    
+    final_layer = validation['layer'].max()
+    final_val_acc = validation[validation['layer']==final_layer]['accuracy'].values[0]
+    final_test_acc = test[test['layer']==final_layer]['accuracy'].values[0]
+    
+    max_val_conf_layer = validation.loc[validation['confidence'].idxmax(), 'layer']
+    max_val_conf = validation['confidence'].max()
+    max_test_conf_layer = test.loc[test['confidence'].idxmax(), 'layer']
+    max_test_conf = test['confidence'].max()
+    
+    summary = {
+        'model': output_prefix,
+        'num_layers': len(validation),
+        'best_val_layer': int(best_val_layer),
+        'best_val_acc': float(best_val_acc),
+        'best_test_layer': int(best_test_layer),
+        'best_test_acc': float(best_test_acc),
+        'final_layer': int(final_layer),
+        'final_val_acc': float(final_val_acc),
+        'final_test_acc': float(final_test_acc),
+        'max_val_conf_layer': int(max_val_conf_layer),
+        'max_val_conf': float(max_val_conf),
+        'max_test_conf_layer': int(max_test_conf_layer),
+        'max_test_conf': float(max_test_conf),
+        'avg_test_acc': float(test['accuracy'].mean()),
+        'std_test_acc': float(test['accuracy'].std())
+    }
     
     # Print key observations
     print("\n" + "="*60)
     print("KEY OBSERVATIONS:")
     print("="*60)
     print(f"\n1. Best performing layers:")
-    print(f"   Validation: Layer {validation.loc[validation['accuracy'].idxmax(), 'layer']} "
-          f"(Accuracy: {validation['accuracy'].max():.3f})")
-    print(f"   Test: Layer {test.loc[test['accuracy'].idxmax(), 'layer']} "
-          f"(Accuracy: {test['accuracy'].max():.3f})")
+    print(f"   Validation: Layer {best_val_layer} (Accuracy: {best_val_acc:.3f})")
+    print(f"   Test: Layer {best_test_layer} (Accuracy: {best_test_acc:.3f})")
     
     # Check if layer 13 exists before reporting on it
     if 13 in validation['layer'].values:
+        layer13_val = validation[validation['layer']==13]['accuracy'].values[0]
+        layer13_test = test[test['layer']==13]['accuracy'].values[0]
         print(f"\n2. Layer 13 performance:")
-        print(f"   Validation accuracy: {validation[validation['layer']==13]['accuracy'].values[0]:.3f}")
-        print(f"   Test accuracy: {test[test['layer']==13]['accuracy'].values[0]:.3f}")
+        print(f"   Validation accuracy: {layer13_val:.3f}")
+        print(f"   Test accuracy: {layer13_test:.3f}")
+        summary['layer13_val_acc'] = float(layer13_val)
+        summary['layer13_test_acc'] = float(layer13_test)
     
-    # Report on final layer
-    final_layer = validation['layer'].max()
     print(f"\n3. Final layer ({final_layer}) performance:")
-    print(f"   Validation: {validation[validation['layer']==final_layer]['accuracy'].values[0]:.3f}, "
-          f"Test: {test[test['layer']==final_layer]['accuracy'].values[0]:.3f}")
+    print(f"   Validation: {final_val_acc:.3f}, Test: {final_test_acc:.3f}")
     
     print(f"\n4. Confidence trends:")
-    print(f"   Validation max confidence at layer {validation.loc[validation['confidence'].idxmax(), 'layer']}: "
-          f"{validation['confidence'].max():.3f}")
-    print(f"   Test max confidence at layer {test.loc[test['confidence'].idxmax(), 'layer']}: "
-          f"{test['confidence'].max():.3f}")
+    print(f"   Validation max confidence at layer {max_val_conf_layer}: {max_val_conf:.3f}")
+    print(f"   Test max confidence at layer {max_test_conf_layer}: {max_test_conf:.3f}")
     
     print(f"\n5. Overall statistics:")
     print(f"   Number of layers analyzed: {len(validation)}")
     print(f"   Average test accuracy: {test['accuracy'].mean():.3f}")
     print(f"   Std dev test accuracy: {test['accuracy'].std():.3f}")
     print("="*60 + "\n")
+    
+    if return_summary:
+        return summary
+
+
+def create_summary_table(csv_files, output_prefixes, output_file='model_summary.csv'):
+    """
+    Create a summary table comparing multiple models.
+    
+    Parameters:
+    -----------
+    csv_files : list of str
+        List of paths to CSV files
+    output_prefixes : list of str
+        List of prefixes for each model
+    output_file : str
+        Output CSV filename (default: 'model_summary.csv')
+    """
+    summaries = []
+    
+    for csv_file, prefix in zip(csv_files, output_prefixes):
+        print(f"\nProcessing {prefix}...")
+        summary = plot_probe_performance(csv_file, output_prefix=prefix, return_summary=True)
+        summaries.append(summary)
+    
+    # Create DataFrame and save
+    df = pd.DataFrame(summaries)
+    df.to_csv(output_file, index=False)
+    print(f"\n✅ Summary table saved to {output_file}")
+    print("\nSummary Table:")
+    print(df.to_string(index=False))
+    
+    return df
 
 
 # Example usage:
 if __name__ == "__main__":
-    # For your current data
-    plot_probe_performance('results/results_05.csv', output_prefix='05')
-    plot_probe_performance('results/results_3.csv', output_prefix='3')
-    plot_probe_performance('results/results_7.csv', output_prefix='7')
-
-    # For other models, just call with different files:
-    # plot_probe_performance('results_12layer.csv', output_prefix='12layer_probe')
-    # plot_probe_performance('results_48layer.csv', output_prefix='48layer_probe')
+    # Process multiple models and create summary table
+    csv_files = [
+        'results/results_05.csv',
+        'results/results_3.csv',
+        'results/results_7.csv'
+    ]
+    
+    output_prefixes = ['model_05', 'model_3', 'model_7']
+    
+    summary_df = create_summary_table(csv_files, output_prefixes, output_file='model_comparison.csv')
