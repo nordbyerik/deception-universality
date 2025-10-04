@@ -90,9 +90,9 @@ class NNsightActivationExtractor:
 
             with torch.no_grad():
                 with self.model.trace(input_ids):
-                    hidden_states = self.model.model.layers[layer_idx].output[0].save()
+                    hidden_states = self.model.model.layers[layer_idx].output.save()
 
-                activations = hidden_states.value
+                activations = hidden_states
 
                 last_token_activations = []
                 for j, mask in enumerate(attention_mask):

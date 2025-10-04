@@ -19,9 +19,6 @@ dependencies = [
     "python-dotenv>=1.1.1",
     "fire>=0.7.1",
     "peft>=0.17.1",
-<<<<<<< Updated upstream
     "matplotlib>=3.10.6",
-=======
     "nnsight>=0.5.7",
->>>>>>> Stashed changes
 ]
