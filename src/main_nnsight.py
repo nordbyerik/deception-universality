@@ -34,6 +34,7 @@ class NNsightActivationExtractor:
         self,
         model_name: str = "Qwen/Qwen2.5-0.5B",
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
+        max_layers: Optional[int] = None,
     ):
         self.model_name = model_name
         self.device = device
@@ -50,14 +51,19 @@ class NNsightActivationExtractor:
             f"Model loaded: {self.num_layers} layers, hidden size {self.hidden_size}"
         )
 
+        self.max_layers = max_layers
+
     def select_layers(self) -> List[int]:
-        if self.num_layers <= 10:
+        if self.max_layers is None:
             return list(range(self.num_layers))
         else:
             layer_indices = [0, self.num_layers - 1]
             if self.num_layers > 2:
                 middle_layers = np.linspace(
-                    1, self.num_layers - 2, min(8, self.num_layers - 2), dtype=int
+                    1,
+                    self.num_layers - 2,
+                    min(self.max_layers - 2, self.num_layers - 2),
+                    dtype=int,
                 )
                 layer_indices.extend(middle_layers.tolist())
             return sorted(list(set(layer_indices)))
@@ -131,7 +137,9 @@ def train_probe(
     num_epochs: int = 25,
     learning_rate: float = 1e-3,
     batch_size: int = 2,
+    break_probe: bool = False,
 ) -> Tuple[SimpleProbe, Dict[str, List[float]], Dict[str, float]]:
+    labels = labels if not break_probe else np.random.randint(0, 2)
     X_train = activations[train_indices].to(device)
     y_train = labels[train_indices].float().to(device)
     X_val = activations[val_indices].to(device)
@@ -168,10 +176,14 @@ def train_probe(
             batch_idx = indices[i : i + batch_size]
             batch_X = X_train_scaled[batch_idx]
             batch_y = y_train[batch_idx]
-
             optimizer.zero_grad()
+
             outputs = probe(batch_X)
-            loss = criterion(outputs.squeeze(), batch_y)
+            outputs = outputs.squeeze()
+            if outputs.dim() == 0:
+                outputs = outputs.unsqueeze(0)
+
+            loss = criterion(outputs, batch_y)
             loss.backward()
             optimizer.step()
 
@@ -290,6 +302,8 @@ def load_dataset(dataset_name: str = "roleplaying") -> Tuple[List[str], List[int
     if dataset_name == "repe_honesty":
         dataset_id = "repe_honesty__you_are_fact_sys"
     elif dataset_name == "roleplaying":
+        dataset_id = "roleplaying__offpolicy_train"
+    elif dataset_name == "roleplaying_plain":
         dataset_id = "roleplaying__plain"
     else:
         raise ValueError(
@@ -347,7 +361,7 @@ def main():
         train_texts, train_labels, train_dataset_id = load_dataset("repe_honesty")
 
         logger.info("--- Initializing NNsight model ---")
-        extractor = NNsightActivationExtractor(device=device)
+        extractor = NNsightActivationExtractor(device=device, max_layers=4)
 
         logger.info("--- Creating train/validation splits ---")
         dataset_size = len(train_texts)
@@ -477,6 +491,15 @@ def main():
         logger.error(
             f"An unexpected error occurred in the main process: {e}", exc_info=True
         )
+
+        import pdb
+        import traceback
+        import sys
+
+        traceback.print_exc()
+        print("\n🔍 Dropping into debugger at exception point...")
+        pdb.post_mortem()
+        sys.exit(1)
 
 
 if __name__ == "__main__":
