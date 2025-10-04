@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 
 import torch
-import torch.nn as nn
-from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
+from transformers import AutoTokenizer, AutoConfig
 from nnsight import LanguageModel
 import os
 from typing import Dict, List, Tuple, Optional
@@ -13,6 +12,7 @@ from sklearn.metrics import roc_auc_score
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from dataclasses import dataclass
+import pickle
 
 from data.deception_detection.deception_detection.repository import DatasetRepository
 from data.deception_detection.deception_detection.types import dialogue_to_string
@@ -32,7 +32,7 @@ class ActivationCache:
 class NNsightActivationExtractor:
     def __init__(
         self,
-        model_name: str = "Qwen/Qwen2.5-3B",
+        model_name: str = "Qwen/Qwen3-0.6B",
         device: str = "cuda" if torch.cuda.is_available() else "cuda",
         max_layers: Optional[int] = None,
     ):
@@ -117,185 +117,111 @@ class NNsightActivationExtractor:
         )
 
 
-class SimpleProbe(nn.Module):
-    def __init__(self, input_size: int, device: str = "cpu"):
-        super().__init__()
-        self.linear = nn.Linear(input_size, 1)
-        self.device = device
-        self.to(device)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.linear(x)
-
-
 def train_probe(
     activations: torch.Tensor,
     labels: torch.Tensor,
     train_indices: List[int],
     val_indices: List[int],
-    device: str,
-    num_epochs: int = 25,
-    learning_rate: float = 1e-3,
-    batch_size: int = 2,
+    max_iter: int = 1000,
     break_probe: bool = False,
-) -> Tuple[SimpleProbe, Dict[str, List[float]], Dict[str, float]]:
-    labels = labels if not break_probe else np.random.randint(0, 2)
-    X_train = activations[train_indices].to(device)
-    y_train = labels[train_indices].float().to(device)
-    X_val = activations[val_indices].to(device)
-    y_val = labels[val_indices].float().to(device)
+) -> Tuple[LogisticRegression, StandardScaler, Dict[str, float]]:
+    if break_probe:
+        labels = torch.randint(0, 2, size=labels.shape)
+
+    X_train = activations[train_indices].cpu().numpy()
+    y_train = labels[train_indices].cpu().numpy()
+    X_val = activations[val_indices].cpu().numpy()
+    y_val = labels[val_indices].cpu().numpy()
 
     scaler = StandardScaler()
-    X_train_np = X_train.cpu().numpy()
-    X_val_np = X_val.cpu().numpy()
-    X_train_scaled = torch.tensor(
-        scaler.fit_transform(X_train_np), dtype=torch.float32
-    ).to(device)
-    X_val_scaled = torch.tensor(scaler.transform(X_val_np), dtype=torch.float32).to(
-        device
-    )
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_val_scaled = scaler.transform(X_val)
 
-    probe = SimpleProbe(activations.shape[1], device)
-    optimizer = torch.optim.Adam(probe.parameters(), lr=learning_rate)
-
-    pos_weight = (y_train == 0).sum().float() / (y_train == 1).sum().float()
-    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-
-    history = {"train_loss": [], "val_loss": [], "val_accuracy": []}
-    best_val_loss = float("inf")
-    patience_counter = 0
-    patience = 15
-
-    for epoch in range(num_epochs):
-        probe.train()
-        epoch_loss = 0.0
-        num_batches = 0
-        print(X_train_scaled.device)
-        indices = torch.randperm(len(X_train_scaled))
-        for i in range(0, len(X_train_scaled), batch_size):
-            batch_idx = indices[i : i + batch_size]
-            batch_X = X_train_scaled[batch_idx]
-            batch_y = y_train[batch_idx]
-            optimizer.zero_grad()
-
-            outputs = probe(batch_X)
-            outputs = outputs.squeeze()
-            if outputs.dim() == 0:
-                outputs = outputs.unsqueeze(0)
-
-            loss = criterion(outputs, batch_y)
-            loss.backward()
-            optimizer.step()
-
-            epoch_loss += loss.item()
-            num_batches += 1
-
-        avg_train_loss = epoch_loss / num_batches
-
-        probe.eval()
-        with torch.no_grad():
-            val_outputs = probe(X_val_scaled)
-            val_loss = criterion(val_outputs.squeeze(), y_val)
-            val_preds = (torch.sigmoid(val_outputs) > 0.5).float()
-            val_accuracy = (val_preds.squeeze() == y_val).float().mean()
-
-        history["train_loss"].append(avg_train_loss)
-        history["val_loss"].append(val_loss.item())
-        history["val_accuracy"].append(val_accuracy.item())
-
-        if (epoch + 1) % 5 == 0:
-            logger.info(
-                f"Epoch {epoch+1}/{num_epochs}: "
-                f"Train Loss={avg_train_loss:.4f}, "
-                f"Val Loss={val_loss.item():.4f}, "
-                f"Val Acc={val_accuracy.item():.3f}"
-            )
-
-        if val_loss.item() < best_val_loss:
-            best_val_loss = val_loss.item()
-            patience_counter = 0
-        else:
-            patience_counter += 1
-            if patience_counter >= patience:
-                logger.info(f"Early stopping at epoch {epoch+1}")
-                break
-
-    probe.eval()
-    with torch.no_grad():
-        val_outputs = probe(X_val_scaled)
-        val_preds = (torch.sigmoid(val_outputs) > 0.5).float()
-        accuracy = (val_preds.squeeze() == y_val).float().mean()
-
-        tp = ((val_preds.squeeze() == 1) & (y_val == 1)).sum().float()
-        fp = ((val_preds.squeeze() == 1) & (y_val == 0)).sum().float()
-        fn = ((val_preds.squeeze() == 0) & (y_val == 1)).sum().float()
-
-        precision = tp / (tp + fp + 1e-8)
-        recall = tp / (tp + fn + 1e-8)
-        f1 = 2 * (precision * recall) / (precision + recall + 1e-8)
-
-        probabilities = torch.sigmoid(val_outputs).squeeze()
-        auroc = roc_auc_score(y_val.cpu().numpy(), probabilities.cpu().numpy())
-        confidence = probabilities.mean()
-
-        deceptive_ratio = val_preds.squeeze().sum() / len(val_preds.squeeze())
-    val_metrics = {
-        "accuracy": accuracy.item(),
-        "precision": precision.item(),
-        "recall": recall.item(),
-        "f1": f1.item(),
-        "auroc": auroc,
-        "confidence": confidence.item(),
-        "num_samples": len(y_val),
-        "deceptive_ratio": deceptive_ratio,
+    class_weights = {
+        0: len(y_train) / (2 * (y_train == 0).sum()),
+        1: len(y_train) / (2 * (y_train == 1).sum()),
     }
 
-    probe.scaler = scaler
+    probe = LogisticRegression(
+        max_iter=max_iter, random_state=42, solver="lbfgs", class_weight=class_weights
+    )
 
-    return probe, history, val_metrics
+    logger.info("Training sklearn LogisticRegression...")
+    probe.fit(X_train_scaled, y_train)
+
+    y_val_pred = probe.predict(X_val_scaled)
+    y_val_proba = probe.predict_proba(X_val_scaled)[:, 1]
+
+    accuracy = (y_val_pred == y_val).mean()
+    tp = ((y_val_pred == 1) & (y_val == 1)).sum()
+    fp = ((y_val_pred == 1) & (y_val == 0)).sum()
+    fn = ((y_val_pred == 0) & (y_val == 1)).sum()
+
+    precision = tp / (tp + fp + 1e-8)
+    recall = tp / (tp + fn + 1e-8)
+    f1 = 2 * (precision * recall) / (precision + recall + 1e-8)
+    auroc = roc_auc_score(y_val, y_val_proba)
+    confidence = y_val_proba.mean()
+    deceptive_ratio = y_val_pred.sum() / len(y_val_pred)
+
+    val_metrics = {
+        "accuracy": float(accuracy),
+        "precision": float(precision),
+        "recall": float(recall),
+        "f1": float(f1),
+        "auroc": float(auroc),
+        "confidence": float(confidence),
+        "num_samples": len(y_val),
+        "deceptive_ratio": float(deceptive_ratio),
+    }
+
+    logger.info(
+        f"Training complete: "
+        f"Val Accuracy={accuracy:.3f}, "
+        f"Precision={precision:.3f}, "
+        f"Recall={recall:.3f}, "
+        f"F1={f1:.3f}, "
+        f"AUROC={auroc:.3f}"
+    )
+
+    return probe, scaler, val_metrics
 
 
 def test_probe(
-    probe: SimpleProbe,
+    probe: LogisticRegression,
+    scaler: StandardScaler,
     activations: torch.Tensor,
     labels: torch.Tensor,
-    device: str,
 ) -> Dict[str, float]:
-    X_test = activations.to(device)
-    y_test = labels.float().to(device)
+    X_test = activations.cpu().numpy()
+    y_test = labels.cpu().numpy()
 
-    X_test_np = X_test.cpu().numpy()
-    X_test_scaled = torch.tensor(
-        probe.scaler.transform(X_test_np), dtype=torch.float32
-    ).to(device)
+    X_test_scaled = scaler.transform(X_test)
 
-    probe.eval()
-    with torch.no_grad():
-        outputs = probe(X_test_scaled)
-        preds = (torch.sigmoid(outputs) > 0.5).float()
-        accuracy = (preds.squeeze() == y_test).float().mean()
+    y_pred = probe.predict(X_test_scaled)
+    y_proba = probe.predict_proba(X_test_scaled)[:, 1]
 
-        tp = ((preds.squeeze() == 1) & (y_test == 1)).sum().float()
-        fp = ((preds.squeeze() == 1) & (y_test == 0)).sum().float()
-        fn = ((preds.squeeze() == 0) & (y_test == 1)).sum().float()
+    accuracy = (y_pred == y_test).mean()
+    tp = ((y_pred == 1) & (y_test == 1)).sum()
+    fp = ((y_pred == 1) & (y_test == 0)).sum()
+    fn = ((y_pred == 0) & (y_test == 1)).sum()
 
-        precision = tp / (tp + fp + 1e-8)
-        recall = tp / (tp + fn + 1e-8)
-        f1 = 2 * (precision * recall) / (precision + recall + 1e-8)
+    precision = tp / (tp + fp + 1e-8)
+    recall = tp / (tp + fn + 1e-8)
+    f1 = 2 * (precision * recall) / (precision + recall + 1e-8)
+    auroc = roc_auc_score(y_test, y_proba)
+    confidence = y_proba.mean()
+    deceptive_ratio = y_pred.sum() / len(y_pred)
 
-        probabilities = torch.sigmoid(outputs).squeeze()
-        auroc = roc_auc_score(y_test.cpu().numpy(), probabilities.cpu().numpy())
-        confidence = probabilities.mean()
-        deceptive_ratio = preds.squeeze().sum() / len(preds.squeeze())
     return {
-        "accuracy": accuracy.item(),
-        "precision": precision.item(),
-        "recall": recall.item(),
-        "f1": f1.item(),
-        "auroc": auroc,
-        "confidence": confidence.item(),
+        "accuracy": float(accuracy),
+        "precision": float(precision),
+        "recall": float(recall),
+        "f1": float(f1),
+        "auroc": float(auroc),
+        "confidence": float(confidence),
         "num_samples": len(y_test),
-        "deceptive_ratio": deceptive_ratio,
+        "deceptive_ratio": float(deceptive_ratio),
     }
 
 
@@ -309,6 +235,7 @@ def load_dataset(dataset_name: str = "roleplaying") -> Tuple[List[str], List[int
         "ai_audit": "ai_audit__no_reasoning",
         "werewolf": "werewolf__paired",
         "ai_liar": "ai_liar__original_without_answers",
+        "ai_liar_with": "ai_liar__original_with_answers",
     }
 
     if dataset_name not in dataset_mapping:
@@ -318,8 +245,9 @@ def load_dataset(dataset_name: str = "roleplaying") -> Tuple[List[str], List[int
 
     dataset_id = dataset_mapping[dataset_name]
     model_name = "prewritten"
-    dataset = repo.get(dataset_id, model=model_name, trim_reasoning=False)
-
+    dataset = repo.get(
+        dataset_id, model=model_name, trim_reasoning=False
+    )  # TODO: Check trim reasoning
     logger.info(f"Successfully loaded dataset '{dataset_id}'.")
     logger.info(f"Dataset size: {len(dataset.dialogues)} dialogues")
 
@@ -329,7 +257,7 @@ def load_dataset(dataset_name: str = "roleplaying") -> Tuple[List[str], List[int
         text = dialogue_to_string(dialogue, "qwen")
         texts.append(text)
         labels.append(1 if "deceptive" in label.value else 0)
-
+    print("Dataset:", dataset_name, "Texts:", texts[0])
     return texts, labels, dataset_id
 
 
@@ -421,7 +349,13 @@ def main():
     all_results = []
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    train_dataset_names = ["repe_honesty", "ai_audit", "werewolf", "ai_liar"]
+    train_dataset_names = [
+        "repe_honesty",
+        "ai_audit",
+        "werewolf",
+        "ai_liar",
+        "ai_liar_with",
+    ]
     test_dataset_name = "roleplaying"
     target_samples_per_dataset = 100
 
@@ -490,35 +424,21 @@ def main():
             )
 
             logger.info("Training probe...")
-            probe, history, val_metrics = train_probe(
+            probe, scaler, val_metrics = train_probe(
                 cache.activations,
                 cache.labels,
                 train_indices,
                 val_indices,
-                device,
-                num_epochs=25,
-                learning_rate=1e-3,
-                batch_size=2,
+                max_iter=1000,
             )
 
-            logger.info(
-                f"Layer {layer_idx} Validation Results: "
-                f"Accuracy={val_metrics['accuracy']:.3f}, "
-                f"Precision={val_metrics['precision']:.3f}, "
-                f"Recall={val_metrics['recall']:.3f}, "
-                f"F1={val_metrics['f1']:.3f}, "
-                f"AUROC={val_metrics['auroc']:.3f}, "
-                f"Deceptive Ratio={val_metrics['deceptive_ratio']:.3f}"
-            )
-
-            probe_path = os.path.join(save_dir, f"probe_layer_{layer_idx}.pt")
-            torch.save(
-                {"state_dict": probe.state_dict(), "scaler": probe.scaler}, probe_path
-            )
+            probe_path = os.path.join(save_dir, f"probe_layer_{layer_idx}.pkl")
+            with open(probe_path, "wb") as f:
+                pickle.dump({"probe": probe, "scaler": scaler}, f)
 
             all_probe_results[layer_idx] = {
                 "probe": probe,
-                "history": history,
+                "scaler": scaler,
                 "val_metrics": val_metrics,
                 "cache": cache,
             }
@@ -551,8 +471,9 @@ def main():
             )
 
             probe = all_probe_results[layer_idx]["probe"]
+            scaler = all_probe_results[layer_idx]["scaler"]
             test_metrics = test_probe(
-                probe, test_cache.activations, test_cache.labels, device
+                probe, scaler, test_cache.activations, test_cache.labels
             )
 
             logger.info(
