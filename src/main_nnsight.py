@@ -39,7 +39,7 @@ class NNsightActivationExtractor:
         self.model_name = model_name
         self.device = device
         logger.info(f"Loading model {model_name} with nnsight...")
-        self.model = LanguageModel(model_name, device_map=device)
+        self.model = LanguageModel(model_name, device_map=device, load_in_8bit=True)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -247,7 +247,7 @@ def train_probe(
         "auroc": auroc,
         "confidence": confidence.item(),
         "num_samples": len(y_val),
-        "deceptive_ratio": deceptive_ratio
+        "deceptive_ratio": deceptive_ratio,
     }
 
     probe.scaler = scaler
@@ -295,26 +295,30 @@ def test_probe(
         "auroc": auroc,
         "confidence": confidence.item(),
         "num_samples": len(y_test),
-        "deceptive_ratio": deceptive_ratio
+        "deceptive_ratio": deceptive_ratio,
     }
 
 
 def load_dataset(dataset_name: str = "roleplaying") -> Tuple[List[str], List[int], str]:
     repo = DatasetRepository()
 
-    if dataset_name == "repe_honesty":
-        dataset_id = "repe_honesty__you_are_fact_sys"
-    elif dataset_name == "roleplaying":
-        dataset_id = "roleplaying__offpolicy_train"
-    elif dataset_name == "roleplaying_plain":
-        dataset_id = "roleplaying__plain"
-    else:
+    dataset_mapping = {
+        "repe_honesty": "repe_honesty__you_are_fact_sys",
+        "roleplaying": "roleplaying__offpolicy_train",
+        "roleplaying_plain": "roleplaying__plain",
+        "ai_audit": "ai_audit__no_reasoning",
+        "werewolf": "werewolf__paired",
+        "ai_liar": "ai_liar__original_without_answers",
+    }
+
+    if dataset_name not in dataset_mapping:
         raise ValueError(
-            f"Unknown dataset name: {dataset_name}. Options: 'repe_honesty', 'roleplaying'"
+            f"Unknown dataset name: {dataset_name}. Options: {list(dataset_mapping.keys())}"
         )
 
+    dataset_id = dataset_mapping[dataset_name]
     model_name = "prewritten"
-    dataset = repo.get(dataset_id, model=model_name)
+    dataset = repo.get(dataset_id, model=model_name, trim_reasoning=False)
 
     logger.info(f"Successfully loaded dataset '{dataset_id}'.")
     logger.info(f"Dataset size: {len(dataset.dialogues)} dialogues")
@@ -327,6 +331,62 @@ def load_dataset(dataset_name: str = "roleplaying") -> Tuple[List[str], List[int
         labels.append(1 if "deceptive" in label.value else 0)
 
     return texts, labels, dataset_id
+
+
+def balance_dataset_oversample(
+    texts: List[str],
+    labels: List[int],
+    sources: List[str],
+    target_samples_per_dataset: Optional[int] = None,
+) -> Tuple[List[str], List[int], List[str]]:
+    if target_samples_per_dataset is None:
+        return texts, labels, sources
+
+    from collections import defaultdict
+    import random
+
+    random.seed(42)
+    np.random.seed(42)
+
+    dataset_indices = defaultdict(list)
+    for i, source in enumerate(sources):
+        dataset_indices[source].append(i)
+
+    balanced_texts = []
+    balanced_labels = []
+    balanced_sources = []
+
+    for dataset_name, indices in dataset_indices.items():
+        dataset_texts = [texts[i] for i in indices]
+        dataset_labels = [labels[i] for i in indices]
+
+        if len(indices) >= target_samples_per_dataset:
+            sampled = random.sample(indices, target_samples_per_dataset)
+            balanced_texts.extend([texts[i] for i in sampled])
+            balanced_labels.extend([labels[i] for i in sampled])
+            balanced_sources.extend([dataset_name] * target_samples_per_dataset)
+            logger.info(
+                f"{dataset_name}: downsampled from {len(indices)} to {target_samples_per_dataset} samples"
+            )
+        else:
+            logger.info(
+                f"{dataset_name}: oversampling from {len(indices)} to {target_samples_per_dataset} samples"
+            )
+
+            balanced_texts.extend(dataset_texts)
+            balanced_labels.extend(dataset_labels)
+            balanced_sources.extend([dataset_name] * len(dataset_texts))
+
+            remaining = target_samples_per_dataset - len(indices)
+            for _ in range(remaining):
+                idx = random.randint(0, len(dataset_texts) - 1)
+                balanced_texts.append(dataset_texts[idx])
+                balanced_labels.append(dataset_labels[idx])
+                balanced_sources.append(dataset_name)
+
+            logger.info(f"{dataset_name}: added {remaining} duplicate samples")
+
+    return balanced_texts, balanced_labels, balanced_sources
 
 
 def create_validation_splits(
@@ -354,20 +414,51 @@ def save_results_to_csv(results: List[Dict], filename: str = "results.csv"):
 
 
 def main():
-    logger.info("SPAR - Training on REPE Honesty, Testing on Roleplaying (NNsight)")
+    logger.info(
+        "SPAR - Training on Multiple Datasets, Testing on Roleplaying (NNsight)"
+    )
 
     all_results = []
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    train_dataset_names = ["repe_honesty", "ai_audit", "werewolf", "ai_liar"]
+    test_dataset_name = "roleplaying"
+    target_samples_per_dataset = 100
+
     try:
-        logger.info("--- Loading REPE Honesty dataset for training/validation ---")
-        train_texts, train_labels, train_dataset_id = load_dataset("repe_honesty")
+        logger.info(f"--- Loading training datasets: {train_dataset_names} ---")
+
+        all_train_texts = []
+        all_train_labels = []
+        dataset_sources = []
+
+        for dataset_name in train_dataset_names:
+            texts, labels, dataset_id = load_dataset(dataset_name)
+            all_train_texts.extend(texts)
+            all_train_labels.extend(labels)
+            dataset_sources.extend([dataset_name] * len(texts))
+            logger.info(f"Added {len(texts)} samples from {dataset_name}")
+
+        logger.info(f"Total training samples before balancing: {len(all_train_texts)}")
 
         logger.info("--- Initializing NNsight model ---")
         extractor = NNsightActivationExtractor(device=device, max_layers=4)
 
+        logger.info("--- Balancing datasets with plain oversampling ---")
+        all_train_texts, all_train_labels, dataset_sources = balance_dataset_oversample(
+            all_train_texts,
+            all_train_labels,
+            dataset_sources,
+            target_samples_per_dataset,
+        )
+
+        logger.info(f"Total training samples after balancing: {len(all_train_texts)}")
+        logger.info(
+            f"Label distribution: {sum(all_train_labels)} deceptive, {len(all_train_labels) - sum(all_train_labels)} honest"
+        )
+
         logger.info("--- Creating train/validation splits ---")
-        dataset_size = len(train_texts)
+        dataset_size = len(all_train_texts)
         train_indices, val_indices = create_validation_splits(
             dataset_size, train_ratio=0.8
         )
@@ -375,7 +466,7 @@ def main():
             f"Dataset split: {len(train_indices)} train, {len(val_indices)} validation examples"
         )
 
-        logger.info("TRAINING PROBES ON REPE HONESTY DATASET")
+        logger.info("TRAINING PROBES ON COMBINED DATASETS")
 
         layer_indices = extractor.select_layers()
         logger.info(f"Selected layers: {layer_indices}")
@@ -391,7 +482,11 @@ def main():
 
             logger.info(f"Extracting activations from layer {layer_idx}...")
             cache = extractor.extract_activations(
-                train_texts, train_labels, layer_idx, batch_size=4, max_length=128
+                all_train_texts,
+                all_train_labels,
+                layer_idx,
+                batch_size=4,
+                max_length=128,
             )
 
             logger.info("Training probe...")
@@ -412,7 +507,7 @@ def main():
                 f"Precision={val_metrics['precision']:.3f}, "
                 f"Recall={val_metrics['recall']:.3f}, "
                 f"F1={val_metrics['f1']:.3f}, "
-                f"AUROC={val_metrics['auroc']:.3f}"
+                f"AUROC={val_metrics['auroc']:.3f}, "
                 f"Deceptive Ratio={val_metrics['deceptive_ratio']:.3f}"
             )
 
@@ -430,7 +525,8 @@ def main():
 
             all_results.append(
                 {
-                    "dataset": "validation",
+                    "train_datasets": "+".join(train_dataset_names),
+                    "test_dataset": "validation",
                     "layer": layer_idx,
                     "probe_type": "logistic",
                     "accuracy": val_metrics["accuracy"],
@@ -443,10 +539,10 @@ def main():
                 }
             )
 
-        logger.info("\n--- Loading Roleplaying dataset for testing ---")
-        test_texts, test_labels, test_dataset_id = load_dataset("roleplaying")
+        logger.info(f"\n--- Loading {test_dataset_name} dataset for testing ---")
+        test_texts, test_labels, test_dataset_id = load_dataset(test_dataset_name)
 
-        logger.info("TESTING PROBES ON ROLEPLAYING DATASET")
+        logger.info(f"TESTING PROBES ON {test_dataset_name.upper()} DATASET")
 
         for layer_idx in layer_indices:
             logger.info(f"\nExtracting test activations from layer {layer_idx}...")
@@ -463,13 +559,14 @@ def main():
                 f"Layer {layer_idx} Test Results: "
                 f"Accuracy={test_metrics['accuracy']:.3f}, "
                 f"F1={test_metrics['f1']:.3f}, "
-                f"AUROC={test_metrics['auroc']:.3f}"
+                f"AUROC={test_metrics['auroc']:.3f}, "
                 f"Deception Ratio={test_metrics['deceptive_ratio']:.3f}"
             )
 
             all_results.append(
                 {
-                    "dataset": "test",
+                    "train_datasets": "+".join(train_dataset_names),
+                    "test_dataset": test_dataset_name,
                     "layer": layer_idx,
                     "probe_type": "logistic",
                     "accuracy": test_metrics["accuracy"],
@@ -487,8 +584,10 @@ def main():
         logger.info("\n" + "=" * 60)
         logger.info("EXPERIMENT COMPLETE")
         logger.info("=" * 60)
-        logger.info(f"Training dataset: REPE Honesty ({len(train_texts)} samples)")
-        logger.info(f"Test dataset: Roleplaying ({len(test_texts)} samples)")
+        logger.info(
+            f"Training datasets: {', '.join(train_dataset_names)} ({len(all_train_texts)} samples)"
+        )
+        logger.info(f"Test dataset: {test_dataset_name} ({len(test_texts)} samples)")
         logger.info(f"Results saved to: results_nnsight.csv ({len(all_results)} rows)")
         logger.info("=" * 60)
 

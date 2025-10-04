@@ -22,4 +22,5 @@ dependencies = [
     "matplotlib>=3.10.6",
     "nnsight>=0.5.7",
     "hf-transfer>=0.1.9",
+    "bitsandbytes>=0.48.1",
 ]

@@ -3,6 +3,7 @@ AGENTS.md
 .claude/
 samples/
 probe_checkpoints/
+probe_checkpoints_nnsight/
 activation_cache/
 cache/
 
