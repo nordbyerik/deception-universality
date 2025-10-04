@@ -39,6 +39,7 @@ import numpy as np
 import pandas as pd
 import csv
 from transformers import AutoConfig
+from sklearn.metrics import roc_auc_score
 
 # Import the new dataset repository
 from data.deception_detection.deception_detection.repository import DatasetRepository
@@ -68,6 +69,10 @@ def validate_probe_on_split(
             binary_preds = (torch.sigmoid(predictions) > 0.5).float()
             accuracy = (binary_preds.squeeze() == y_split.float()).float().mean()
 
+            # Calculate AUROC using predicted probabilities
+            probabilities = torch.sigmoid(predictions).squeeze()
+            auroc = roc_auc_score(y_split.cpu().numpy(), probabilities.cpu().numpy())
+
             # Calculate precision, recall, F1
             tp = ((binary_preds.squeeze() == 1) & (y_split.float() == 1)).sum().float()
             fp = ((binary_preds.squeeze() == 1) & (y_split.float() == 0)).sum().float()
@@ -82,6 +87,19 @@ def validate_probe_on_split(
             accuracy = (binary_preds == y_split.long().squeeze()).float().mean()
             precision = recall = f1 = accuracy  # Simplified for multi-class
 
+            # For multi-class, calculate macro-averaged AUROC
+            try:
+                probabilities = torch.softmax(predictions, dim=1)
+                auroc = roc_auc_score(
+                    y_split.cpu().numpy(),
+                    probabilities.cpu().numpy(),
+                    multi_class='ovr',
+                    average='macro'
+                )
+            except ValueError:
+                # Fallback if there's only one class in the split
+                auroc = 0.5
+
         # Calculate mean prediction confidence
         if predictions.shape[1] == 1:
             confidence = torch.sigmoid(predictions).mean()
@@ -93,6 +111,7 @@ def validate_probe_on_split(
         "precision": precision.item(),
         "recall": recall.item(),
         "f1": f1.item(),
+        "auroc": auroc if isinstance(auroc, float) else auroc.item(),
         "confidence": confidence.item(),
         "num_samples": len(y_split),
     }
@@ -185,7 +204,7 @@ def train_logistic_probe(
     logger.info(
         f"Logistic Probe Validation Results: Accuracy={val_metrics['accuracy']:.3f}, "
         f"Precision={val_metrics['precision']:.3f}, Recall={val_metrics['recall']:.3f}, "
-        f"F1={val_metrics['f1']:.3f}, Confidence={val_metrics['confidence']:.3f}"
+        f"F1={val_metrics['f1']:.3f}, AUROC={val_metrics['auroc']:.3f}, Confidence={val_metrics['confidence']:.3f}"
     )
 
     # Save if requested
@@ -275,6 +294,7 @@ def test_probes_on_dataset(
                 "precision": test_metrics["precision"],
                 "recall": test_metrics["recall"],
                 "f1": test_metrics["f1"],
+                "auroc": test_metrics["auroc"],
                 "confidence": test_metrics["confidence"],
                 "num_samples": test_metrics["num_samples"],
             }
@@ -282,7 +302,7 @@ def test_probes_on_dataset(
 
             logger.info(
                 f"Layer {layer_num} {probe_type}: Acc={test_metrics['accuracy']:.3f}, "
-                f"F1={test_metrics['f1']:.3f}, Samples={test_metrics['num_samples']}"
+                f"F1={test_metrics['f1']:.3f}, AUROC={test_metrics['auroc']:.3f}, Samples={test_metrics['num_samples']}"
             )
 
         # Clean up pipeline and model after processing this hook point
@@ -323,6 +343,7 @@ def compare_layer_performance(
                     "precision": val_metrics["precision"],
                     "recall": val_metrics["recall"],
                     "f1": val_metrics["f1"],
+                    "auroc": val_metrics["auroc"],
                     "confidence": val_metrics["confidence"],
                     "num_samples": val_metrics["num_samples"],
                 }
@@ -338,15 +359,15 @@ def compare_layer_performance(
 
     # Print formatted table
     logger.info(
-        f"\n{'Layer':<6} {'Hook Point':<25} {'Probe':<10} {'Acc':<6} {'Prec':<6} {'Rec':<6} {'F1':<6} {'Conf':<6}"
+        f"\n{'Layer':<6} {'Hook Point':<25} {'Probe':<10} {'Acc':<6} {'Prec':<6} {'Rec':<6} {'F1':<6} {'AUROC':<6} {'Conf':<6}"
     )
-    logger.info("-" * 75)
+    logger.info("-" * 85)
 
     for data in performance_data:
         logger.info(
             f"{data['layer']:<6} {data['hook_point']:<25} {data['probe_type']:<10} "
             f"{data['accuracy']:<6.3f} {data['precision']:<6.3f} {data['recall']:<6.3f} "
-            f"{data['f1']:<6.3f} {data['confidence']:<6.3f}"
+            f"{data['f1']:<6.3f} {data['auroc']:<6.3f} {data['confidence']:<6.3f}"
         )
 
     # Find best performing layer/probe combinations
