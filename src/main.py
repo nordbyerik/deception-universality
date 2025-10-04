@@ -403,7 +403,7 @@ def load_dataset(dataset_name: str = "roleplaying"):
     if dataset_name == "repe_honesty":
         dataset_id = "repe_honesty__you_are_fact_sys"
     elif dataset_name == "roleplaying":
-        dataset_id = "roleplaying__plain"
+        dataset_id = "roleplaying__offpolicy_train"
     else:
         raise ValueError(
             f"Unknown dataset name: {dataset_name}. Options: 'repe_honesty', 'roleplaying'"
@@ -490,7 +490,7 @@ def main():
         train_texts, train_dataset_id = load_dataset("repe_honesty")
 
         # --- 2. Setup model config and tokenizer ---
-        model_name = "Qwen/Qwen2.5-7B"
+        model_name = "Qwen/Qwen2.5-3B"
         model_config = AutoConfig.from_pretrained(model_name)
         num_layers = model_config.num_hidden_layers
         logger.info(f"Model {model_name} has {num_layers} layers")

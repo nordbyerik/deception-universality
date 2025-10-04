@@ -32,8 +32,8 @@ class ActivationCache:
 class NNsightActivationExtractor:
     def __init__(
         self,
-        model_name: str = "Qwen/Qwen2.5-0.5B",
-        device: str = "cuda" if torch.cuda.is_available() else "cpu",
+        model_name: str = "Qwen/Qwen2.5-3B",
+        device: str = "cuda" if torch.cuda.is_available() else "cuda",
         max_layers: Optional[int] = None,
     ):
         self.model_name = model_name
@@ -170,7 +170,7 @@ def train_probe(
         probe.train()
         epoch_loss = 0.0
         num_batches = 0
-
+        print(X_train_scaled.device)
         indices = torch.randperm(len(X_train_scaled))
         for i in range(0, len(X_train_scaled), batch_size):
             batch_idx = indices[i : i + batch_size]
@@ -238,6 +238,7 @@ def train_probe(
         auroc = roc_auc_score(y_val.cpu().numpy(), probabilities.cpu().numpy())
         confidence = probabilities.mean()
 
+        deceptive_ratio = val_preds.squeeze().sum() / len(val_preds.squeeze())
     val_metrics = {
         "accuracy": accuracy.item(),
         "precision": precision.item(),
@@ -246,6 +247,7 @@ def train_probe(
         "auroc": auroc,
         "confidence": confidence.item(),
         "num_samples": len(y_val),
+        "deceptive_ratio": deceptive_ratio
     }
 
     probe.scaler = scaler
@@ -284,7 +286,7 @@ def test_probe(
         probabilities = torch.sigmoid(outputs).squeeze()
         auroc = roc_auc_score(y_test.cpu().numpy(), probabilities.cpu().numpy())
         confidence = probabilities.mean()
-
+        deceptive_ratio = preds.squeeze().sum() / len(preds.squeeze())
     return {
         "accuracy": accuracy.item(),
         "precision": precision.item(),
@@ -293,6 +295,7 @@ def test_probe(
         "auroc": auroc,
         "confidence": confidence.item(),
         "num_samples": len(y_test),
+        "deceptive_ratio": deceptive_ratio
     }
 
 
@@ -410,6 +413,7 @@ def main():
                 f"Recall={val_metrics['recall']:.3f}, "
                 f"F1={val_metrics['f1']:.3f}, "
                 f"AUROC={val_metrics['auroc']:.3f}"
+                f"Deceptive Ratio={val_metrics['deceptive_ratio']:.3f}"
             )
 
             probe_path = os.path.join(save_dir, f"probe_layer_{layer_idx}.pt")
@@ -460,6 +464,7 @@ def main():
                 f"Accuracy={test_metrics['accuracy']:.3f}, "
                 f"F1={test_metrics['f1']:.3f}, "
                 f"AUROC={test_metrics['auroc']:.3f}"
+                f"Deception Ratio={test_metrics['deceptive_ratio']:.3f}"
             )
 
             all_results.append(
@@ -491,15 +496,6 @@ def main():
         logger.error(
             f"An unexpected error occurred in the main process: {e}", exc_info=True
         )
-
-        import pdb
-        import traceback
-        import sys
-
-        traceback.print_exc()
-        print("\n🔍 Dropping into debugger at exception point...")
-        pdb.post_mortem()
-        sys.exit(1)
 
 
 if __name__ == "__main__":

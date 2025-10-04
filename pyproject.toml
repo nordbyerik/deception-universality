@@ -21,4 +21,5 @@ dependencies = [
     "peft>=0.17.1",
     "matplotlib>=3.10.6",
     "nnsight>=0.5.7",
+    "hf-transfer>=0.1.9",
 ]
