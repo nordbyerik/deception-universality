@@ -172,7 +172,8 @@ def dialogue_to_string(
 
     result = []
 
-    for msg in dialogue:
+    for msg in dialogue:  # TODO: Append role by model name
+        result.append(f"{str(msg.role)}:")
         result.append(msg.content)
 
     return " ".join(result)
