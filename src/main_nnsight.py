@@ -351,34 +351,20 @@ def save_results_to_csv(results: List[Dict], filename: str = "results.csv"):
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="SPAR - Training on Multiple Datasets, Testing on Roleplaying (NNsight)"
-    )
-    parser.add_argument(
-        "--model",
-        type=str,
-        default="Qwen/Qwen3-0.6B",
-        help="Model name to use for activation extraction",
-    )
-    parser.add_argument(
-        "--train-datasets",
-        type=str,
-        nargs="+",
-        default=["repe_honesty", "ai_audit", "werewolf", "ai_liar", "ai_liar_with"],
-        help="List of training dataset names",
-    )
-    parser.add_argument(
-        "--test-dataset",
-        type=str,
-        default="roleplaying",
-        help="Test dataset name",
-    )
-    args = parser.parse_args()
 
     logger.info(
         "SPAR - Training on Multiple Datasets, Testing on Roleplaying (NNsight)"
     )
 
+    train_dataset_names = [
+        "repe_honesty",
+        "ai_audit",
+        "werewolf",
+        "ai_liar",
+        "ai_liar_with",
+    ]
+    test_dataset_name = "roleplaying"
+    
     all_results = []
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -405,7 +391,7 @@ def main():
 
         logger.info("--- Initializing NNsight model ---")
         extractor = NNsightActivationExtractor(
-            model_name=model_name, device=device, max_layers=4
+            device=device, max_layers=4
         )
 
         logger.info("--- Balancing datasets with plain oversampling ---")
