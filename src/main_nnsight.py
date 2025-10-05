@@ -228,7 +228,9 @@ def test_probe(
     }
 
 
-def load_dataset(dataset_name: str = "roleplaying", tokenizer: Optional[AutoTokenizer] = None) -> Tuple[List[str], List[int], str]:
+def load_dataset(
+    dataset_name: str = "roleplaying", tokenizer: Optional[AutoTokenizer] = None
+) -> Tuple[List[str], List[int], str]:
     repo = DatasetRepository()
 
     dataset_mapping = {
@@ -248,23 +250,28 @@ def load_dataset(dataset_name: str = "roleplaying", tokenizer: Optional[AutoToke
 
     dataset_id = dataset_mapping[dataset_name]
     model_name = "prewritten"
-    dataset = repo.get(
-        dataset_id, model=model_name, trim_reasoning=False
-    )
+    dataset = repo.get(dataset_id, model=model_name)
     logger.info(f"Successfully loaded dataset '{dataset_id}'.")
     logger.info(f"Dataset size: {len(dataset.dialogues)} dialogues")
 
     if tokenizer is not None:
-        processed = [preprocess_dialogue(d, fold_system=False) for d in dataset.dialogues]
+        processed = [
+            preprocess_dialogue(d, fold_system=False) for d in dataset.dialogues
+        ]
         texts: List[str] = tokenizer.apply_chat_template(
             processed, tokenize=False, add_generation_prompt=False
         )
     else:
         raise ValueError("Tokenizer must be provided to convert dialogues to strings")
-    
+
     labels_int = [1 if label.value == "deceptive" else 0 for label in dataset.labels]
-    
-    print("Dataset:", dataset_name, "Texts:", texts[0] if isinstance(texts[0], str) else texts[0])
+
+    print(
+        "Dataset:",
+        dataset_name,
+        "Texts:",
+        texts[0] if isinstance(texts[0], str) else texts[0],
+    )
     return texts, labels_int, dataset_id
 
 
@@ -434,12 +441,15 @@ def main():
         logger.info(f"Total training samples before balancing: {len(all_train_texts)}")
 
         logger.info("--- Balancing datasets with plain oversampling ---")
-        all_train_texts, all_train_labels, dataset_sources = balance_dataset_oversample(
-            all_train_texts,
-            all_train_labels,
-            dataset_sources,
-            target_samples_per_dataset,
-        )
+        if len(train_dataset_names) > 1:
+            all_train_texts, all_train_labels, dataset_sources = (
+                balance_dataset_oversample(
+                    all_train_texts,
+                    all_train_labels,
+                    dataset_sources,
+                    target_samples_per_dataset,
+                )
+            )
 
         logger.info(f"Total training samples after balancing: {len(all_train_texts)}")
         logger.info(
@@ -515,7 +525,9 @@ def main():
             )
 
         logger.info(f"\n--- Loading {test_dataset_name} dataset for testing ---")
-        test_texts, test_labels, test_dataset_id = load_dataset(test_dataset_name, extractor.tokenizer)
+        test_texts, test_labels, test_dataset_id = load_dataset(
+            test_dataset_name, extractor.tokenizer
+        )
 
         logger.info(f"TESTING PROBES ON {test_dataset_name.upper()} DATASET")
 
