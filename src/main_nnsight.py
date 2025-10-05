@@ -13,6 +13,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from dataclasses import dataclass
 import pickle
+import argparse
 
 from data.deception_detection.deception_detection.repository import DatasetRepository
 from data.deception_detection.deception_detection.types import dialogue_to_string
@@ -68,6 +69,7 @@ class NNsightActivationExtractor:
                 layer_indices.extend(middle_layers.tolist())
             return sorted(list(set(layer_indices)))
 
+
     def extract_activations(
         self,
         texts: List[str],
@@ -91,14 +93,21 @@ class NNsightActivationExtractor:
                 max_length=max_length,
             )
 
-            input_ids = inputs["input_ids"].to(self.device)
-            attention_mask = inputs["attention_mask"].to(self.device)
+            # Fix 1: Put inputs on the device where the embedding layer is
+            # This is typically the first device in your device_map
+            first_device = next(self.model.parameters()).device
+            input_ids = inputs["input_ids"].to(first_device)
+            attention_mask = inputs["attention_mask"].to(first_device)
 
             with torch.no_grad():
                 with self.model.trace(input_ids):
                     hidden_states = self.model.model.layers[layer_idx].output.save()
 
                 activations = hidden_states
+
+                # Fix 2: Move attention_mask to the same device as activations if needed
+                # (activations will be on whatever GPU that layer is on)
+                attention_mask = attention_mask.to(activations.device)
 
                 last_token_activations = []
                 for j, mask in enumerate(attention_mask):
@@ -342,6 +351,30 @@ def save_results_to_csv(results: List[Dict], filename: str = "results.csv"):
 
 
 def main():
+    parser = argparse.ArgumentParser(
+        description="SPAR - Training on Multiple Datasets, Testing on Roleplaying (NNsight)"
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="Qwen/Qwen3-0.6B",
+        help="Model name to use for activation extraction",
+    )
+    parser.add_argument(
+        "--train-datasets",
+        type=str,
+        nargs="+",
+        default=["repe_honesty", "ai_audit", "werewolf", "ai_liar", "ai_liar_with"],
+        help="List of training dataset names",
+    )
+    parser.add_argument(
+        "--test-dataset",
+        type=str,
+        default="roleplaying",
+        help="Test dataset name",
+    )
+    args = parser.parse_args()
+
     logger.info(
         "SPAR - Training on Multiple Datasets, Testing on Roleplaying (NNsight)"
     )
@@ -349,14 +382,9 @@ def main():
     all_results = []
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    train_dataset_names = [
-        "repe_honesty",
-        "ai_audit",
-        "werewolf",
-        "ai_liar",
-        "ai_liar_with",
-    ]
-    test_dataset_name = "roleplaying"
+    model_name = args.model
+    train_dataset_names = args.train_datasets
+    test_dataset_name = args.test_dataset
     target_samples_per_dataset = 100
 
     try:
@@ -376,7 +404,9 @@ def main():
         logger.info(f"Total training samples before balancing: {len(all_train_texts)}")
 
         logger.info("--- Initializing NNsight model ---")
-        extractor = NNsightActivationExtractor(device=device, max_layers=4)
+        extractor = NNsightActivationExtractor(
+            model_name=model_name, device=device, max_layers=4
+        )
 
         logger.info("--- Balancing datasets with plain oversampling ---")
         all_train_texts, all_train_labels, dataset_sources = balance_dataset_oversample(
