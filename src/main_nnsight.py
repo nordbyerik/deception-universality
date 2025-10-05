@@ -16,7 +16,7 @@ import pickle
 import argparse
 
 from data.deception_detection.deception_detection.repository import DatasetRepository
-from data.deception_detection.deception_detection.types import dialogue_to_string
+from data.deception_detection.deception_detection.utils import preprocess_dialogue
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -38,9 +38,8 @@ class NNsightActivationExtractor:
         max_layers: Optional[int] = None,
     ):
         self.model_name = model_name
-        self.device = device
         logger.info(f"Loading model {model_name} with nnsight...")
-        self.model = LanguageModel(model_name, device_map=device, load_in_8bit=True)
+        self.model = LanguageModel(model_name, device_map="auto", load_in_8bit=True)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -69,7 +68,6 @@ class NNsightActivationExtractor:
                 layer_indices.extend(middle_layers.tolist())
             return sorted(list(set(layer_indices)))
 
-
     def extract_activations(
         self,
         texts: List[str],
@@ -87,27 +85,23 @@ class NNsightActivationExtractor:
 
             inputs = self.tokenizer(
                 batch_texts,
-                return_tensors="pt",
                 padding="max_length",
                 truncation=True,
                 max_length=max_length,
             )
 
-            # Fix 1: Put inputs on the device where the embedding layer is
-            # This is typically the first device in your device_map
-            first_device = next(self.model.parameters()).device
-            input_ids = inputs["input_ids"].to(first_device)
-            attention_mask = inputs["attention_mask"].to(first_device)
+            attention_mask = torch.tensor(inputs["attention_mask"])
 
             with torch.no_grad():
-                with self.model.trace(input_ids):
+                with self.model.trace(
+                    batch_texts,
+                    padding="max_length",
+                    truncation=True,
+                    max_length=max_length,
+                ):
                     hidden_states = self.model.model.layers[layer_idx].output.save()
 
                 activations = hidden_states
-
-                # Fix 2: Move attention_mask to the same device as activations if needed
-                # (activations will be on whatever GPU that layer is on)
-                attention_mask = attention_mask.to(activations.device)
 
                 last_token_activations = []
                 for j, mask in enumerate(attention_mask):
@@ -234,7 +228,7 @@ def test_probe(
     }
 
 
-def load_dataset(dataset_name: str = "roleplaying") -> Tuple[List[str], List[int], str]:
+def load_dataset(dataset_name: str = "roleplaying", tokenizer: Optional[AutoTokenizer] = None) -> Tuple[List[str], List[int], str]:
     repo = DatasetRepository()
 
     dataset_mapping = {
@@ -256,18 +250,22 @@ def load_dataset(dataset_name: str = "roleplaying") -> Tuple[List[str], List[int
     model_name = "prewritten"
     dataset = repo.get(
         dataset_id, model=model_name, trim_reasoning=False
-    )  # TODO: Check trim reasoning
+    )
     logger.info(f"Successfully loaded dataset '{dataset_id}'.")
     logger.info(f"Dataset size: {len(dataset.dialogues)} dialogues")
 
-    texts = []
-    labels = []
-    for dialogue, label in zip(dataset.dialogues, dataset.labels):
-        text = dialogue_to_string(dialogue, "qwen")
-        texts.append(text)
-        labels.append(1 if "deceptive" in label.value else 0)
-    print("Dataset:", dataset_name, "Texts:", texts[0])
-    return texts, labels, dataset_id
+    if tokenizer is not None:
+        processed = [preprocess_dialogue(d, fold_system=False) for d in dataset.dialogues]
+        texts: List[str] = tokenizer.apply_chat_template(
+            processed, tokenize=False, add_generation_prompt=False
+        )
+    else:
+        raise ValueError("Tokenizer must be provided to convert dialogues to strings")
+    
+    labels_int = [1 if label.value == "deceptive" else 0 for label in dataset.labels]
+    
+    print("Dataset:", dataset_name, "Texts:", texts[0] if isinstance(texts[0], str) else texts[0])
+    return texts, labels_int, dataset_id
 
 
 def balance_dataset_oversample(
@@ -351,29 +349,75 @@ def save_results_to_csv(results: List[Dict], filename: str = "results.csv"):
 
 
 def main():
+    parser = argparse.ArgumentParser(
+        description="Train and test deception detection probes on language models"
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="Qwen/Qwen3-0.6B",
+        help="Model name from HuggingFace (default: Qwen/Qwen3-0.6B)",
+    )
+    parser.add_argument(
+        "--train-datasets",
+        type=str,
+        nargs="+",
+        default=["repe_honesty"],
+        help="Training dataset names (space-separated)",
+    )
+    parser.add_argument(
+        "--test-dataset",
+        type=str,
+        default="roleplaying",
+        help="Test dataset name (default: roleplaying)",
+    )
+    parser.add_argument(
+        "--target-samples",
+        type=int,
+        default=100,
+        help="Target samples per dataset for balancing (default: 100)",
+    )
+    parser.add_argument(
+        "--max-layers",
+        type=int,
+        default=4,
+        help="Maximum number of layers to probe (default: 4)",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=4,
+        help="Batch size for activation extraction (default: 4)",
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default="results_nnsight.csv",
+        help="Output CSV file path (default: results_nnsight.csv)",
+    )
+
+    args = parser.parse_args()
 
     logger.info(
         "SPAR - Training on Multiple Datasets, Testing on Roleplaying (NNsight)"
     )
+    logger.info(f"Model: {args.model}")
+    logger.info(f"Train datasets: {args.train_datasets}")
+    logger.info(f"Test dataset: {args.test_dataset}")
 
-    train_dataset_names = [
-        "repe_honesty",
-        "ai_audit",
-        "werewolf",
-        "ai_liar",
-        "ai_liar_with",
-    ]
-    test_dataset_name = "roleplaying"
-    
     all_results = []
-    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     model_name = args.model
     train_dataset_names = args.train_datasets
     test_dataset_name = args.test_dataset
-    target_samples_per_dataset = 100
+    target_samples_per_dataset = args.target_samples
 
     try:
+        logger.info("--- Initializing NNsight model ---")
+        extractor = NNsightActivationExtractor(
+            model_name=model_name, max_layers=args.max_layers
+        )
+
         logger.info(f"--- Loading training datasets: {train_dataset_names} ---")
 
         all_train_texts = []
@@ -381,18 +425,13 @@ def main():
         dataset_sources = []
 
         for dataset_name in train_dataset_names:
-            texts, labels, dataset_id = load_dataset(dataset_name)
+            texts, labels, dataset_id = load_dataset(dataset_name, extractor.tokenizer)
             all_train_texts.extend(texts)
             all_train_labels.extend(labels)
             dataset_sources.extend([dataset_name] * len(texts))
             logger.info(f"Added {len(texts)} samples from {dataset_name}")
 
         logger.info(f"Total training samples before balancing: {len(all_train_texts)}")
-
-        logger.info("--- Initializing NNsight model ---")
-        extractor = NNsightActivationExtractor(
-            device=device, max_layers=4
-        )
 
         logger.info("--- Balancing datasets with plain oversampling ---")
         all_train_texts, all_train_labels, dataset_sources = balance_dataset_oversample(
@@ -435,7 +474,7 @@ def main():
                 all_train_texts,
                 all_train_labels,
                 layer_idx,
-                batch_size=4,
+                batch_size=args.batch_size,
                 max_length=128,
             )
 
@@ -476,14 +515,18 @@ def main():
             )
 
         logger.info(f"\n--- Loading {test_dataset_name} dataset for testing ---")
-        test_texts, test_labels, test_dataset_id = load_dataset(test_dataset_name)
+        test_texts, test_labels, test_dataset_id = load_dataset(test_dataset_name, extractor.tokenizer)
 
         logger.info(f"TESTING PROBES ON {test_dataset_name.upper()} DATASET")
 
         for layer_idx in layer_indices:
             logger.info(f"\nExtracting test activations from layer {layer_idx}...")
             test_cache = extractor.extract_activations(
-                test_texts, test_labels, layer_idx, batch_size=4, max_length=128
+                test_texts,
+                test_labels,
+                layer_idx,
+                batch_size=args.batch_size,
+                max_length=128,
             )
 
             probe = all_probe_results[layer_idx]["probe"]
@@ -516,7 +559,7 @@ def main():
                 }
             )
 
-        save_results_to_csv(all_results, "results_nnsight.csv")
+        save_results_to_csv(all_results, args.output)
 
         logger.info("\n" + "=" * 60)
         logger.info("EXPERIMENT COMPLETE")
@@ -525,7 +568,7 @@ def main():
             f"Training datasets: {', '.join(train_dataset_names)} ({len(all_train_texts)} samples)"
         )
         logger.info(f"Test dataset: {test_dataset_name} ({len(test_texts)} samples)")
-        logger.info(f"Results saved to: results_nnsight.csv ({len(all_results)} rows)")
+        logger.info(f"Results saved to: {args.output} ({len(all_results)} rows)")
         logger.info("=" * 60)
 
     except Exception as e:

@@ -151,34 +151,6 @@ TOKENS = {
 }
 
 
-def dialogue_to_string(
-    dialogue: Dialogue, model: str = "llama3", tokens: Union[dict, None] = None
-) -> str:
-    """
-    Convert a dialogue to a formatted string using the specified model's tokens.
-
-    Args:
-        dialogue: List of Message objects
-        model: Model name (e.g., 'llama3', 'mistral', 'gemma')
-        tokens: Optional custom token dict (uses TOKENS[model] if not provided)
-
-    Returns:
-        Formatted string with appropriate delimiters
-    """
-    if tokens is None:
-        if "qwen" in model.lower():
-            model = "qwen"
-        tokens = TOKENS.get(model, TOKENS["llama3"])
-
-    result = []
-
-    for msg in dialogue:  # TODO: Append role by model name
-        result.append(f"{str(msg.role)}:")
-        result.append(msg.content)
-
-    return " ".join(result)
-
-
 class GradingPromptGetter(Protocol):
     def __call__(
         self,

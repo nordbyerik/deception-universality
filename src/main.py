@@ -43,12 +43,10 @@ from sklearn.metrics import roc_auc_score
 
 # Import the new dataset repository
 from data.deception_detection.deception_detection.repository import DatasetRepository
-from data.deception_detection.deception_detection.types import dialogue_to_string
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
 
 
 def validate_probe_on_split(
@@ -93,8 +91,8 @@ def validate_probe_on_split(
                 auroc = roc_auc_score(
                     y_split.cpu().numpy(),
                     probabilities.cpu().numpy(),
-                    multi_class='ovr',
-                    average='macro'
+                    multi_class="ovr",
+                    average="macro",
                 )
             except ValueError:
                 # Fallback if there's only one class in the split
@@ -141,7 +139,7 @@ def train_logistic_probe(
     val_indices: List[int],
     save_dir: Optional[str] = None,
     hook_point_list: Optional[List[str]] = None,
-) -> Tuple[LogisticProbe, Dict[str, List[float]], Dict[str, float], 'ProbePipeline']:
+) -> Tuple[LogisticProbe, Dict[str, List[float]], Dict[str, float], "ProbePipeline"]:
     """Train a logistic probe for truthfulness detection using ProbePipeline."""
     logger.info(f"\n=== Training Logistic Probe on {hook_point} ===")
 
@@ -282,7 +280,7 @@ def test_probes_on_dataset(
             )
 
             # Move probe to CPU and clear cache to free GPU memory
-            probe.to('cpu')
+            probe.to("cpu")
             torch.cuda.empty_cache()
 
             result = {
@@ -306,8 +304,8 @@ def test_probes_on_dataset(
             )
 
         # Clean up pipeline and model after processing this hook point
-        if hasattr(pipeline, 'collector') and hasattr(pipeline.collector, 'model'):
-            pipeline.collector.model.to('cpu')
+        if hasattr(pipeline, "collector") and hasattr(pipeline.collector, "model"):
+            pipeline.collector.model.to("cpu")
             del pipeline.collector.model
             del pipeline.collector
         del pipeline
@@ -444,8 +442,6 @@ def prepare_dataset_for_testing(
     """Prepare a dataset for testing by tokenizing (pipelines will handle activation extraction)."""
     examples = []
     for dialogue, label in texts_with_labels:
-        # Convert dialogue to string using dialogue_to_string with qwen format
-        text = dialogue_to_string(dialogue, "qwen")
         example = ProbingExample(
             text=text,
             label=1 if "deceptive" in label.value else 0,  # Convert boolean to int
@@ -568,8 +564,10 @@ def main():
                 )
 
                 # Clean up the model from GPU memory after training
-                if hasattr(pipeline, 'collector') and hasattr(pipeline.collector, 'model'):
-                    pipeline.collector.model.to('cpu')
+                if hasattr(pipeline, "collector") and hasattr(
+                    pipeline.collector, "model"
+                ):
+                    pipeline.collector.model.to("cpu")
                     del pipeline.collector.model
                     del pipeline.collector
                 del pipeline
