@@ -18,10 +18,10 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from torch import Tensor
 
-from deception_detection.activations import Activations
-from deception_detection.log import logger
-from deception_detection.scores import Scores
-from deception_detection.utils import squeeze_sparse_tensor
+from .activations import Activations
+from .log import logger
+from .scores import Scores
+from .utils import squeeze_sparse_tensor
 
 
 class Detector(ABC):

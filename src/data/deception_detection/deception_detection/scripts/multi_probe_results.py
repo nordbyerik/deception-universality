@@ -3,13 +3,13 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
 
-from deception_detection.experiment import Experiment, ExperimentConfig
-from deception_detection.prompt_scorer import create_prompt_scorer
-from deception_detection.results.utils import (
+from .experiment import Experiment, ExperimentConfig
+from .prompt_scorer import create_prompt_scorer
+from .results.utils import (
     get_dataframe_of_scores_on_dataset,
     to_readable_dataset_name,
 )
-from deception_detection.utils import REPO_ROOT
+from .utils import REPO_ROOT
 
 
 def load_experiment(

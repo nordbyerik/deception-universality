@@ -17,6 +17,8 @@ import argparse
 
 from data.deception_detection.deception_detection.repository import DatasetRepository
 from data.deception_detection.deception_detection.utils import preprocess_dialogue
+from data.deception_detection.deception_detection.tokenized_data import TokenizedDataset
+from data.deception_detection.deception_detection.data import DialogueDataset
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -34,12 +36,14 @@ class NNsightActivationExtractor:
     def __init__(
         self,
         model_name: str = "Qwen/Qwen3-0.6B",
-        device: str = "cuda" if torch.cuda.is_available() else "cuda",
+        device: str = "cuda" if torch.cuda.is_available() else "cpu",
         max_layers: Optional[int] = None,
     ):
         self.model_name = model_name
-        logger.info(f"Loading model {model_name} with nnsight...")
-        self.model = LanguageModel(model_name, device_map="auto", load_in_8bit=True)
+        self.device = device
+        use_8bit = torch.cuda.is_available()
+        logger.info(f"Loading model {model_name} with nnsight (device={device}, 8bit={use_8bit})...")
+        self.model = LanguageModel(model_name, device_map="auto", load_in_8bit=use_8bit)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -70,51 +74,55 @@ class NNsightActivationExtractor:
 
     def extract_activations(
         self,
-        texts: List[str],
-        labels: List[int],
+        dataset: DialogueDataset,
         layer_idx: int,
         batch_size: int = 4,
-        max_length: int = 128,
+        max_length: int = 512,
     ) -> ActivationCache:
+        """Extract activations at all detection mask positions.
+
+        Returns one activation vector per TOKEN (not per dialogue), matching the original implementation.
+        """
+        # Use their TokenizedDataset to get proper detection masks
+        tokenized = TokenizedDataset.from_dataset(
+            dataset,
+            self.tokenizer,
+            max_length=max_length,
+        )
+
         all_activations = []
         all_labels = []
 
-        for i in range(0, len(texts), batch_size):
-            batch_texts = texts[i : i + batch_size]
-            batch_labels = labels[i : i + batch_size]
-
-            inputs = self.tokenizer(
-                batch_texts,
-                padding="max_length",
-                truncation=True,
-                max_length=max_length,
-            )
-
-            attention_mask = torch.tensor(inputs["attention_mask"])
+        for i in range(0, len(tokenized), batch_size):
+            batch_tokenized = tokenized[i : i + batch_size]
+            batch_labels = dataset.labels[i : i + batch_size]
 
             with torch.no_grad():
                 with self.model.trace(
-                    batch_texts,
-                    padding="max_length",
-                    truncation=True,
-                    max_length=max_length,
+                    batch_tokenized.tokens,
+                    attention_mask=batch_tokenized.attention_mask,
                 ):
                     hidden_states = self.model.model.layers[layer_idx].output.save()
 
-                activations = hidden_states
+                # hidden_states shape: [batch, seq, hidden_dim]
+                activations = hidden_states.cpu()
 
-                last_token_activations = []
-                for j, mask in enumerate(attention_mask):
-                    last_pos = mask.sum().item() - 1
-                    last_token_activations.append(activations[j, last_pos, :])
+                # Extract activations at detection mask positions
+                detection_mask = batch_tokenized.detection_mask
+                assert detection_mask is not None, "Detection mask is required"
 
-                batch_activations = torch.stack(last_token_activations)
-                all_activations.append(batch_activations.cpu())
-                all_labels.extend(batch_labels)
+                # Get activations where mask is True
+                for j in range(len(batch_tokenized)):
+                    dialogue_acts = activations[j][detection_mask[j]]  # [num_detect_tokens, hidden_dim]
+                    all_activations.append(dialogue_acts)
+                    # Repeat label for each token in this dialogue
+                    label = 1 if batch_labels[j].value == "deceptive" else 0
+                    all_labels.extend([label] * len(dialogue_acts))
 
+        # Concatenate all tokens from all dialogues
         return ActivationCache(
-            activations=torch.cat(all_activations, dim=0),
-            labels=torch.tensor(all_labels),
+            activations=torch.cat(all_activations, dim=0),  # [total_tokens, hidden_dim]
+            labels=torch.tensor(all_labels),  # [total_tokens]
             layer_idx=layer_idx,
             hook_name=f"layer_{layer_idx}",
         )
@@ -228,9 +236,8 @@ def test_probe(
     }
 
 
-def load_dataset(
-    dataset_name: str = "roleplaying", tokenizer: Optional[AutoTokenizer] = None
-) -> Tuple[List[str], List[int], str]:
+def load_dataset(dataset_name: str = "roleplaying") -> DialogueDataset:
+    """Load a DialogueDataset directly, reusing their data loading code."""
     repo = DatasetRepository()
 
     dataset_mapping = {
@@ -254,94 +261,60 @@ def load_dataset(
     logger.info(f"Successfully loaded dataset '{dataset_id}'.")
     logger.info(f"Dataset size: {len(dataset.dialogues)} dialogues")
 
-    if tokenizer is not None:
-        processed = [
-            preprocess_dialogue(d, fold_system=False) for d in dataset.dialogues
-        ]
-        texts: List[str] = tokenizer.apply_chat_template(
-            processed, tokenize=False, add_generation_prompt=False
-        )
-    else:
-        raise ValueError("Tokenizer must be provided to convert dialogues to strings")
-
-    labels_int = [1 if label.value == "deceptive" else 0 for label in dataset.labels]
-
-    print(
-        "Dataset:",
-        dataset_name,
-        "Texts:",
-        texts[0] if isinstance(texts[0], str) else texts[0],
-    )
-    return texts, labels_int, dataset_id
+    return dataset
 
 
-def balance_dataset_oversample(
-    texts: List[str],
-    labels: List[int],
-    sources: List[str],
+def combine_datasets(
+    datasets: List[DialogueDataset],
+    dataset_names: List[str],
     target_samples_per_dataset: Optional[int] = None,
-) -> Tuple[List[str], List[int], List[str]]:
-    if target_samples_per_dataset is None:
-        return texts, labels, sources
-
-    from collections import defaultdict
+) -> DialogueDataset:
+    """Combine multiple datasets, optionally balancing them."""
     import random
+    from copy import deepcopy
 
     random.seed(42)
     np.random.seed(42)
 
-    dataset_indices = defaultdict(list)
-    for i, source in enumerate(sources):
-        dataset_indices[source].append(i)
+    all_dialogues = []
+    all_labels = []
 
-    balanced_texts = []
-    balanced_labels = []
-    balanced_sources = []
+    for dataset, name in zip(datasets, dataset_names):
+        dialogues = dataset.dialogues
+        labels = dataset.labels
 
-    for dataset_name, indices in dataset_indices.items():
-        dataset_texts = [texts[i] for i in indices]
-        dataset_labels = [labels[i] for i in indices]
-
-        if len(indices) >= target_samples_per_dataset:
-            sampled = random.sample(indices, target_samples_per_dataset)
-            balanced_texts.extend([texts[i] for i in sampled])
-            balanced_labels.extend([labels[i] for i in sampled])
-            balanced_sources.extend([dataset_name] * target_samples_per_dataset)
+        if target_samples_per_dataset is None:
+            # Use all data
+            all_dialogues.extend(dialogues)
+            all_labels.extend(labels)
+            logger.info(f"{name}: using all {len(dialogues)} samples")
+        elif len(dialogues) >= target_samples_per_dataset:
+            # Downsample
+            indices = random.sample(range(len(dialogues)), target_samples_per_dataset)
+            all_dialogues.extend([dialogues[i] for i in indices])
+            all_labels.extend([labels[i] for i in indices])
             logger.info(
-                f"{dataset_name}: downsampled from {len(indices)} to {target_samples_per_dataset} samples"
+                f"{name}: downsampled from {len(dialogues)} to {target_samples_per_dataset} samples"
             )
         else:
+            # Oversample
+            all_dialogues.extend(dialogues)
+            all_labels.extend(labels)
+            remaining = target_samples_per_dataset - len(dialogues)
+            for _ in range(remaining):
+                idx = random.randint(0, len(dialogues) - 1)
+                all_dialogues.append(dialogues[idx])
+                all_labels.append(labels[idx])
             logger.info(
-                f"{dataset_name}: oversampling from {len(indices)} to {target_samples_per_dataset} samples"
+                f"{name}: oversampled from {len(dialogues)} to {target_samples_per_dataset} samples"
             )
 
-            balanced_texts.extend(dataset_texts)
-            balanced_labels.extend(dataset_labels)
-            balanced_sources.extend([dataset_name] * len(dataset_texts))
+    # Create a combined dataset using the first dataset as template
+    combined = deepcopy(datasets[0])
+    combined.dialogues = all_dialogues
+    combined.labels = all_labels
 
-            remaining = target_samples_per_dataset - len(indices)
-            for _ in range(remaining):
-                idx = random.randint(0, len(dataset_texts) - 1)
-                balanced_texts.append(dataset_texts[idx])
-                balanced_labels.append(dataset_labels[idx])
-                balanced_sources.append(dataset_name)
-
-            logger.info(f"{dataset_name}: added {remaining} duplicate samples")
-
-    return balanced_texts, balanced_labels, balanced_sources
-
-
-def create_validation_splits(
-    dataset_size: int, train_ratio: float = 0.8
-) -> Tuple[List[int], List[int]]:
-    torch.manual_seed(42)
-    shuffled_indices = torch.randperm(dataset_size).tolist()
-
-    split_idx = int(dataset_size * train_ratio)
-    train_indices = shuffled_indices[:split_idx]
-    val_indices = shuffled_indices[split_idx:]
-
-    return train_indices, val_indices
+    return combined
 
 
 def save_results_to_csv(results: List[Dict], filename: str = "results.csv"):
@@ -402,6 +375,12 @@ def main():
         default="results_nnsight.csv",
         help="Output CSV file path (default: results_nnsight.csv)",
     )
+    parser.add_argument(
+        "--max-length",
+        type=int,
+        default=512,
+        help="Maximum sequence length for tokenization (default: 512)",
+    )
 
     args = parser.parse_args()
 
@@ -427,42 +406,42 @@ def main():
 
         logger.info(f"--- Loading training datasets: {train_dataset_names} ---")
 
-        all_train_texts = []
-        all_train_labels = []
-        dataset_sources = []
-
+        # Load all datasets
+        train_datasets = []
         for dataset_name in train_dataset_names:
-            texts, labels, dataset_id = load_dataset(dataset_name, extractor.tokenizer)
-            all_train_texts.extend(texts)
-            all_train_labels.extend(labels)
-            dataset_sources.extend([dataset_name] * len(texts))
-            logger.info(f"Added {len(texts)} samples from {dataset_name}")
+            dataset = load_dataset(dataset_name)
+            train_datasets.append(dataset)
 
-        logger.info(f"Total training samples before balancing: {len(all_train_texts)}")
-
-        logger.info("--- Balancing datasets with plain oversampling ---")
-        if len(train_dataset_names) > 1:
-            all_train_texts, all_train_labels, dataset_sources = (
-                balance_dataset_oversample(
-                    all_train_texts,
-                    all_train_labels,
-                    dataset_sources,
-                    target_samples_per_dataset,
-                )
-            )
-
-        logger.info(f"Total training samples after balancing: {len(all_train_texts)}")
-        logger.info(
-            f"Label distribution: {sum(all_train_labels)} deceptive, {len(all_train_labels) - sum(all_train_labels)} honest"
+        logger.info("--- Combining/balancing datasets ---")
+        combined_dataset = combine_datasets(
+            train_datasets,
+            train_dataset_names,
+            target_samples_per_dataset if len(train_dataset_names) > 1 else None
         )
 
+        logger.info(f"Total training dialogues: {len(combined_dataset.dialogues)}")
+        deceptive_count = sum(1 for l in combined_dataset.labels if l.value == "deceptive")
+        logger.info(
+            f"Label distribution: {deceptive_count} deceptive, {len(combined_dataset.labels) - deceptive_count} honest"
+        )
+
+        # Split dataset at dialogue level
         logger.info("--- Creating train/validation splits ---")
-        dataset_size = len(all_train_texts)
-        train_indices, val_indices = create_validation_splits(
-            dataset_size, train_ratio=0.8
-        )
+        from copy import deepcopy
+        num_dialogues = len(combined_dataset.dialogues)
+        num_val = int(num_dialogues * 0.2)
+
+        # Sequential split (matching the original implementation)
+        train_dataset = deepcopy(combined_dataset)
+        train_dataset.dialogues = combined_dataset.dialogues[:-num_val] if num_val > 0 else combined_dataset.dialogues
+        train_dataset.labels = combined_dataset.labels[:-num_val] if num_val > 0 else combined_dataset.labels
+
+        val_dataset = deepcopy(combined_dataset)
+        val_dataset.dialogues = combined_dataset.dialogues[-num_val:] if num_val > 0 else []
+        val_dataset.labels = combined_dataset.labels[-num_val:] if num_val > 0 else []
+
         logger.info(
-            f"Dataset split: {len(train_indices)} train, {len(val_indices)} validation examples"
+            f"Dataset split: {len(train_dataset.dialogues)} train, {len(val_dataset.dialogues)} validation dialogues"
         )
 
         logger.info("TRAINING PROBES ON COMBINED DATASETS")
@@ -480,18 +459,33 @@ def main():
             logger.info(f"{'='*40}")
 
             logger.info(f"Extracting activations from layer {layer_idx}...")
-            cache = extractor.extract_activations(
-                all_train_texts,
-                all_train_labels,
+            # Extract from train dialogues
+            train_cache = extractor.extract_activations(
+                train_dataset,
                 layer_idx,
                 batch_size=args.batch_size,
-                max_length=128,
+                max_length=args.max_length,
             )
+            # Extract from val dialogues
+            val_cache = extractor.extract_activations(
+                val_dataset,
+                layer_idx,
+                batch_size=args.batch_size,
+                max_length=args.max_length,
+            )
+
+            logger.info(f"Train tokens: {len(train_cache.activations)}, Val tokens: {len(val_cache.activations)}")
+
+            # Combine and create indices for the probe training function
+            all_acts = torch.cat([train_cache.activations, val_cache.activations], dim=0)
+            all_labels = torch.cat([train_cache.labels, val_cache.labels], dim=0)
+            train_indices = list(range(len(train_cache.activations)))
+            val_indices = list(range(len(train_cache.activations), len(all_acts)))
 
             logger.info("Training probe...")
             probe, scaler, val_metrics = train_probe(
-                cache.activations,
-                cache.labels,
+                all_acts,
+                all_labels,
                 train_indices,
                 val_indices,
                 max_iter=1000,
@@ -505,7 +499,6 @@ def main():
                 "probe": probe,
                 "scaler": scaler,
                 "val_metrics": val_metrics,
-                "cache": cache,
             }
 
             all_results.append(
@@ -525,20 +518,17 @@ def main():
             )
 
         logger.info(f"\n--- Loading {test_dataset_name} dataset for testing ---")
-        test_texts, test_labels, test_dataset_id = load_dataset(
-            test_dataset_name, extractor.tokenizer
-        )
+        test_dataset = load_dataset(test_dataset_name)
 
         logger.info(f"TESTING PROBES ON {test_dataset_name.upper()} DATASET")
 
         for layer_idx in layer_indices:
             logger.info(f"\nExtracting test activations from layer {layer_idx}...")
             test_cache = extractor.extract_activations(
-                test_texts,
-                test_labels,
+                test_dataset,
                 layer_idx,
                 batch_size=args.batch_size,
-                max_length=128,
+                max_length=args.max_length,
             )
 
             probe = all_probe_results[layer_idx]["probe"]
@@ -577,9 +567,9 @@ def main():
         logger.info("EXPERIMENT COMPLETE")
         logger.info("=" * 60)
         logger.info(
-            f"Training datasets: {', '.join(train_dataset_names)} ({len(all_train_texts)} samples)"
+            f"Training datasets: {', '.join(train_dataset_names)} ({len(train_dataset.dialogues)} train + {len(val_dataset.dialogues)} val dialogues)"
         )
-        logger.info(f"Test dataset: {test_dataset_name} ({len(test_texts)} samples)")
+        logger.info(f"Test dataset: {test_dataset_name} ({len(test_dataset.dialogues)} dialogues)")
         logger.info(f"Results saved to: {args.output} ({len(all_results)} rows)")
         logger.info("=" * 60)
 

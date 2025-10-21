@@ -7,7 +7,7 @@ import pandas as pd
 import streamlit as st
 import yaml
 
-from deception_detection.utils import REPO_ROOT
+from .utils import REPO_ROOT
 
 
 def load_file_data(file_path: Path) -> None:

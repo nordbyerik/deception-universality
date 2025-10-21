@@ -6,11 +6,11 @@ from jaxtyping import Float
 from torch import Tensor
 from transformers import PreTrainedTokenizerBase
 
-from deception_detection.activations import Activations
-from deception_detection.data import CarSalesman
-from deception_detection.notebooks.old.utils import get_repe_detector
-from deception_detection.tokenized_data import TokenizedDataset
-from deception_detection.utils import get_gemma_model_and_tokenizer
+from .activations import Activations
+from .data import CarSalesman
+from .notebooks.old.utils import get_repe_detector
+from .tokenized_data import TokenizedDataset
+from .utils import get_gemma_model_and_tokenizer
 
 torch.set_grad_enabled(False)
 

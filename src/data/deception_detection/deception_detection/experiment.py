@@ -3,38 +3,41 @@ from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
+import torch
 import yaml
 from pydantic import AfterValidator, BaseModel, Field, field_serializer, field_validator
 from tqdm import tqdm, trange
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
-from deception_detection.activations import Activations, PairedActivations
-from deception_detection.baselines import compute_black_box_scores_for_dataset
-from deception_detection.data import DialogueDataset
-from deception_detection.detectors import (
+from .activations import Activations, PairedActivations
+from .baselines import compute_black_box_scores_for_dataset
+from .data import DialogueDataset
+from .detectors import (
     Detector,
     get_detector_class,
 )
-from deception_detection.log import logger
-from deception_detection.models import (
+from .log import logger
+from .models import (
     ModelName,
     get_model_and_tokenizer,
     get_model_name,
     get_num_layers_for_model,
 )
-from deception_detection.repository import DatasetRepository
-from deception_detection.sae import get_sae_acts
-from deception_detection.scores import Scores
-from deception_detection.tokenized_data import TokenizedDataset
-from deception_detection.types import Message
-from deception_detection.utils import REPO_ROOT
+from .repository import DatasetRepository
+from .sae import get_sae_acts
+from .scores import Scores
+from .tokenized_data import TokenizedDataset
+from .types import Message
+from .utils import REPO_ROOT
 
 REPOSITORY = DatasetRepository()
 
 Reduction = Literal["mean", "max", "relu"]
 
 # we wrap in a lambda to avoid avoid passing model info as kwarg to check_dataset_name
-DatasetName = Annotated[str, AfterValidator(lambda name: REPOSITORY.check_dataset_name(name))]
+DatasetName = Annotated[
+    str, AfterValidator(lambda name: REPOSITORY.check_dataset_name(name))
+]
 ControlDatasetName = Annotated[
     str, AfterValidator(lambda name: REPOSITORY.check_dataset_name(name))
 ]
@@ -105,7 +108,9 @@ class ExperimentConfig(BaseModel):
     control_dataset_size: int = 1000
 
     # Detector configuration
-    detect_layers: list[int] = Field(default_factory=list)  # if empty, will be set to middle half
+    detect_layers: list[int] = Field(
+        default_factory=list
+    )  # if empty, will be set to middle half
     detect_num_latents: int | None = None
 
     # Other
@@ -122,7 +127,9 @@ class ExperimentConfig(BaseModel):
 
     # Experiment identification and storage
     id: str = ""
-    timestamp: str = Field(default_factory=lambda: datetime.now().strftime("%Y%m%d_%H%M%S"))
+    timestamp: str = Field(
+        default_factory=lambda: datetime.now().strftime("%Y%m%d_%H%M%S")
+    )
     name: str = ""
     folder: Path = Field(default_factory=lambda: REPO_ROOT / "results")
 
@@ -155,7 +162,9 @@ class ExperimentConfig(BaseModel):
             with open(folder / "cfg.yaml") as f:
                 config_data = yaml.safe_load(f)
         else:
-            assert (folder / "cfg.json").exists(), f"No config file found in folder {folder}"
+            assert (
+                folder / "cfg.json"
+            ).exists(), f"No config file found in folder {folder}"
             with open(folder / "cfg.json") as f:
                 config_data = json.load(f)
 
@@ -226,9 +235,13 @@ class ExperimentConfig(BaseModel):
                 raise ValueError("Detect layers must be set to [0] for goodfire SAEs.")
         if self.max_llama_token_length is not None:
             if self.model_name.type != "llama":
-                raise ValueError("max_llama_token_length only supported for llama models")
+                raise ValueError(
+                    "max_llama_token_length only supported for llama models"
+                )
             if not self.use_goodfire_sae_acts:
-                raise ValueError("max_llama_token_length only supported when using goodfire SAEs")
+                raise ValueError(
+                    "max_llama_token_length only supported when using goodfire SAEs"
+                )
 
     def _setup_folder_and_config(self) -> None:
         self.folder = self.folder / self.name
@@ -285,6 +298,7 @@ class Experiment:
             return detector_class.load(path)
 
         logger.info("Training detector")
+        print("Torch is_available", torch.cuda.is_available())
 
         split_paired_acts = PairedActivations.from_dataset(
             dataset=self.train_dataset,
@@ -317,17 +331,22 @@ class Experiment:
     # ----- DATASETS ----- #
 
     def get_train_dataset(self) -> DialogueDataset:
-        train_dataset = self.get_dataset(self.cfg.train_data, model=self.train_policy_model)
+        train_dataset = self.get_dataset(
+            self.cfg.train_data, model=self.train_policy_model
+        )
         num_val = int(len(train_dataset) * self.cfg.val_fraction)
         return train_dataset[:-num_val] if num_val > 0 else train_dataset
 
     def get_eval_datasets(self) -> list[DialogueDataset]:
         eval_datasets = [
-            self.get_dataset(name, model=self.eval_policy_model) for name in self.cfg.eval_data
+            self.get_dataset(name, model=self.eval_policy_model)
+            for name in self.cfg.eval_data
         ]
 
         # Add validation split if val_fraction > 0
-        train_dataset = self.get_dataset(self.cfg.train_data, model=self.train_policy_model)
+        train_dataset = self.get_dataset(
+            self.cfg.train_data, model=self.train_policy_model
+        )
         num_val = int(len(train_dataset) * self.cfg.val_fraction)
         val_dataset = train_dataset[-num_val:] if num_val > 0 else None
         if val_dataset:
@@ -339,7 +358,11 @@ class Experiment:
 
     def get_control_datasets(self) -> list[DialogueDataset]:
         """Get control datasets using either on-policy or pre-written data based on config."""
-        model = get_model_name(self.cfg.model_name) if self.cfg.control_on_policy else "prewritten"
+        model = (
+            get_model_name(self.cfg.model_name)
+            if self.cfg.control_on_policy
+            else "prewritten"
+        )
 
         control_datasets = [
             self.get_dataset(name, model=model)[: self.cfg.control_dataset_size]
@@ -401,7 +424,9 @@ class Experiment:
         Returns:
             A dict of (dataset name, scores)
         """
-        file_name = "control_scores_all_tokens.json" if all_tokens else "control_scores.json"
+        file_name = (
+            "control_scores_all_tokens.json" if all_tokens else "control_scores.json"
+        )
         path = self.cfg.folder / file_name
 
         if not path.exists():
@@ -411,7 +436,9 @@ class Experiment:
         with open(path) as f:
             raw_scores = json.load(f)
 
-        return {dataset: Scores.from_dict(scores) for dataset, scores in raw_scores.items()}
+        return {
+            dataset: Scores.from_dict(scores) for dataset, scores in raw_scores.items()
+        }
 
     def get_eval_scores(self, all_tokens: bool = False) -> dict[str, Scores]:
         """
@@ -465,11 +492,17 @@ class Experiment:
 
         all_scores = {}
         all_scores_all_tokens = {}
-        for dataset in tqdm(datasets, desc=f"{'Control' if is_control else 'Eval'} Datasets"):
+        for dataset in tqdm(
+            datasets, desc=f"{'Control' if is_control else 'Eval'} Datasets"
+        ):
             shard_size = (
-                None if self.cfg.use_goodfire_sae_acts else shard_sizes.get(dataset.name, 12)
+                None
+                if self.cfg.use_goodfire_sae_acts
+                else shard_sizes.get(dataset.name, 12)
             )
-            scores, scores_all_tokens = self.compute_scores_for_dataset(dataset, shard_size)
+            scores, scores_all_tokens = self.compute_scores_for_dataset(
+                dataset, shard_size
+            )
             all_scores[dataset.name] = scores
             all_scores_all_tokens[dataset.name] = scores_all_tokens
             # add is_deceptive to scores
@@ -541,13 +574,17 @@ class Experiment:
                 acts.apply_sae_latent_mask(self.cfg.sae_latent_whitelist)
             return acts
 
-        acts = Activations.from_model(self.model, toks, batch_size=4, layers=self.cfg.detect_layers)
+        acts = Activations.from_model(
+            self.model, toks, batch_size=4, layers=self.cfg.detect_layers
+        )
         if self.cfg.use_local_sae_acts:
             acts = self.to_local_sae_acts(acts)
 
         return acts
 
-    def recompute_scores_on_dataset(self, dataset_name: str, shard_size: int = 12) -> None:
+    def recompute_scores_on_dataset(
+        self, dataset_name: str, shard_size: int = 12
+    ) -> None:
         """Recompute scores on a dataset (or add new dataset)"""
         dataset = self.get_dataset(dataset_name, model=self.eval_policy_model)
         scores = self.get_eval_scores(all_tokens=False)
@@ -583,7 +620,10 @@ class Experiment:
         if scores_file.exists():
             with open(scores_file) as f:
                 data = json.load(f)
-                all_scores = {dataset: Scores.from_dict(scores) for dataset, scores in data.items()}
+                all_scores = {
+                    dataset: Scores.from_dict(scores)
+                    for dataset, scores in data.items()
+                }
             return all_scores
 
         all_scores = {}
@@ -608,7 +648,10 @@ class Experiment:
         if scores_file.exists():
             with open(scores_file) as f:
                 data = json.load(f)
-                all_scores = {dataset: Scores.from_dict(scores) for dataset, scores in data.items()}
+                all_scores = {
+                    dataset: Scores.from_dict(scores)
+                    for dataset, scores in data.items()
+                }
             return all_scores
 
         control_scores: dict[str, Scores] = {}
@@ -633,7 +676,9 @@ class Experiment:
             data = json.load(f)
             return data[dataset_name]
 
-    def get_black_box_control_reasonings(self, dataset_name: str = "alpaca__plain") -> list[str]:
+    def get_black_box_control_reasonings(
+        self, dataset_name: str = "alpaca__plain"
+    ) -> list[str]:
         scores_file = self.cfg.folder / "black_box_control_reasonings.json"
         with open(scores_file) as f:
             data = json.load(f)

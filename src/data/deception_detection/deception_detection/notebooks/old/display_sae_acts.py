@@ -3,21 +3,21 @@ from pathlib import Path
 import fire
 import torch
 
-from deception_detection.activations import Activations
-from deception_detection.data.base import DialogueDataset
-from deception_detection.detectors import Detector
-from deception_detection.experiment import Scores
-from deception_detection.log import logger
-from deception_detection.results.token_html import (
+from .activations import Activations
+from .data.base import DialogueDataset
+from .detectors import Detector
+from .experiment import Scores
+from .log import logger
+from .results.token_html import (
     get_page_html,
     make_token_scores_html_at_indices,
     save_token_scores,
     select_sample_indexes,
 )
-from deception_detection.sae import get_sae_acts
-from deception_detection.tokenized_data import TokenizedDataset
-from deception_detection.utils import REPO_ROOT, get_gemma_model_and_tokenizer
-from deception_detection.vars import ALL_DATASETS_DICT
+from .sae import get_sae_acts
+from .tokenized_data import TokenizedDataset
+from .utils import REPO_ROOT, get_gemma_model_and_tokenizer
+from .vars import ALL_DATASETS_DICT
 
 
 class IdxDetector(Detector):

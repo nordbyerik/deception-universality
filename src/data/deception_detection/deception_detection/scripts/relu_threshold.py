@@ -3,12 +3,12 @@
 import matplotlib.pyplot as plt
 import torch
 
-from deception_detection.experiment import Experiment, ExperimentConfig
-from deception_detection.metrics import get_auroc
-from deception_detection.prompt_scorer import ReluPromptScorer
-from deception_detection.scores import Scores
-from deception_detection.types import Label
-from deception_detection.utils import REPO_ROOT
+from .experiment import Experiment, ExperimentConfig
+from .metrics import get_auroc
+from .prompt_scorer import ReluPromptScorer
+from .scores import Scores
+from .types import Label
+from .utils import REPO_ROOT
 
 
 def get_aurocs_vs_honest(

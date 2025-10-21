@@ -13,11 +13,11 @@ from torch import Tensor
 from tqdm import trange
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
-from deception_detection.data.base import DialogueDataset
-from deception_detection.goodfire_client import get_goodfire_activations
-from deception_detection.log import logger
-from deception_detection.tokenized_data import TokenizedDataset, get_tokenized_dataset_pair
-from deception_detection.utils import REPO_ROOT, mask_sparse_activations
+from .data.base import DialogueDataset
+from .goodfire_client import get_goodfire_activations
+from .log import logger
+from .tokenized_data import TokenizedDataset, get_tokenized_dataset_pair
+from .utils import REPO_ROOT, mask_sparse_activations
 
 
 @dataclass

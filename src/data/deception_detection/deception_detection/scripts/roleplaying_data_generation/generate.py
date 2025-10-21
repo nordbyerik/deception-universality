@@ -15,12 +15,12 @@ from inspect_ai.model import ChatMessageUser
 from inspect_ai.solver import Generate, TaskState, generate, solver
 from pydantic import BaseModel
 
-from deception_detection.scripts.roleplaying_data_generation.scorers import (
+from .scripts.roleplaying_data_generation.scorers import (
     VettingProperty,
     get_scorers,
 )
-from deception_detection.scripts.roleplaying_data_generation.utils import extract_and_parse_json
-from deception_detection.utils import REPO_ROOT
+from .scripts.roleplaying_data_generation.utils import extract_and_parse_json
+from .utils import REPO_ROOT
 
 
 class DataPoint(TypedDict):

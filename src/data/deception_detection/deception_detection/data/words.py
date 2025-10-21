@@ -1,6 +1,6 @@
-from deception_detection.data import DialogueDataset
-from deception_detection.data.base import DialogueDataType
-from deception_detection.types import Dialogue, Label, Message
+from .data import DialogueDataset
+from .data.base import DialogueDataType
+from .types import Dialogue, Label, Message
 
 POSITIVE = [
     "joy",

@@ -1,11 +1,11 @@
 # %%
-from deception_detection.data import AILiarDataset, InsiderTrading, WerewolfOpenResponse
-from deception_detection.rollouts import (
+from .data import AILiarDataset, InsiderTrading, WerewolfOpenResponse
+from .rollouts import (
     RolloutGenerator,
     evaluate_all_dialogues,
     load_rollout_dialogues,
 )
-from deception_detection.utils import get_gemma_model_and_tokenizer
+from .utils import get_gemma_model_and_tokenizer
 
 model, tokenizer = get_gemma_model_and_tokenizer(9)
 assert model is not None

@@ -10,45 +10,46 @@ from pathlib import Path
 import fire
 import pandas as pd
 
-from .data import *
+from . import data
+
 from .data.base import DialogueDataset
 from .log import logger
 from .types import Label
 from .utils import REPO_ROOT
 
 ALL_DATASETS: list[type[DialogueDataset]] = [
-    RepeHonestDishonestFacts,
-    AlpacaDataset,
-    AILiarDataset,
-    AIAudit,
-    RolePlayingDataset,
-    RepeHonestDishonestFacts,
-    AlpacaDataset,
-    AILiarDataset,
-    WerewolfDataset,
-    GTCities,
-    GTCitiesCitiesConj,
-    GTCitiesCitiesDisj,
-    GTCommonClaim,
-    GTCompanies,
-    GTCounterfact,
-    GTLargerThan,
-    GTNegCities,
-    GTNegSpEnTrans,
-    GTSmallerThan,
-    GTSpEnTrans,
-    GTMixed,
-    ISAnimals,
-    ISCities,
-    ISCompanies,
-    ISElements,
-    ISFacts,
-    ISInventions,
-    ProceduralFacts,
-    DescriptiveQA,
-    InsiderTrading,
-    InsiderTradingDoubleDown,
-    SandbaggingV2Dataset,
+    data.RepeHonestDishonestFacts,
+    data.AlpacaDataset,
+    data.AILiarDataset,
+    data.AIAudit,
+    data.RolePlayingDataset,
+    data.RepeHonestDishonestFacts,
+    data.AlpacaDataset,
+    data.AILiarDataset,
+    data.WerewolfDataset,
+    data.GTCities,
+    data.GTCitiesCitiesConj,
+    data.GTCitiesCitiesDisj,
+    data.GTCommonClaim,
+    data.GTCompanies,
+    data.GTCounterfact,
+    data.GTLargerThan,
+    data.GTNegCities,
+    data.GTNegSpEnTrans,
+    data.GTSmallerThan,
+    data.GTSpEnTrans,
+    data.GTMixed,
+    data.ISAnimals,
+    data.ISCities,
+    data.ISCompanies,
+    data.ISElements,
+    data.ISFacts,
+    data.ISInventions,
+    data.ProceduralFacts,
+    data.DescriptiveQA,
+    data.InsiderTrading,
+    data.InsiderTradingDoubleDown,
+    data.SandbaggingV2Dataset,
 ]
 
 

@@ -5,26 +5,26 @@ import numpy as np
 import pandas as pd
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
-from deception_detection.activations import Activations
-from deception_detection.data.ai_liar import AILiarDataset
-from deception_detection.data.base import PairedDialogueDataset
-from deception_detection.data.control import AlpacaDataset
-from deception_detection.data.geometry_of_truth import Cities
-from deception_detection.data.repe import RepeHonestDishonestFacts
-from deception_detection.detectors import (
+from .activations import Activations
+from .data.ai_liar import AILiarDataset
+from .data.base import PairedDialogueDataset
+from .data.control import AlpacaDataset
+from .data.geometry_of_truth import Cities
+from .data.repe import RepeHonestDishonestFacts
+from .detectors import (
     DirectionDetector,
     LATDetector,
     LogisticRegressionDetector,
     MMSDetector,
 )
-from deception_detection.metrics import (
+from .metrics import (
     get_auroc,
     get_tpr_at_fpr_from_control_dataset,
     get_tpr_at_fpr_from_paired_dataset,
 )
-from deception_detection.rollouts import load_rollout_dialogues
-from deception_detection.tokenized_data import TokenizedDataset, get_tokenized_dataset_pair
-from deception_detection.utils import get_gemma_model_and_tokenizer
+from .rollouts import load_rollout_dialogues
+from .tokenized_data import TokenizedDataset, get_tokenized_dataset_pair
+from .utils import get_gemma_model_and_tokenizer
 
 
 # %%

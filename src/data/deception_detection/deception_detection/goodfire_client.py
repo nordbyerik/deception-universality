@@ -17,9 +17,9 @@ from jaxtyping import Float
 from torch import Tensor
 from tqdm import tqdm
 
-from deception_detection.log import logger
-from deception_detection.tokenized_data import TokenizedDataset
-from deception_detection.types import Dialogue
+from .log import logger
+from .tokenized_data import TokenizedDataset
+from .types import Dialogue
 
 # Thread-local storage for Goodfire clients
 thread_local = threading.local()

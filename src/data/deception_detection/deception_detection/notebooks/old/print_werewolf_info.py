@@ -1,9 +1,9 @@
 # %%
 from termcolor import colored
 
-from deception_detection.data import WerewolfOpenResponse
-from deception_detection.rollouts import load_rollout_dialogues
-from deception_detection.utils import REPO_ROOT
+from .data import WerewolfOpenResponse
+from .rollouts import load_rollout_dialogues
+from .utils import REPO_ROOT
 
 werewolf_rollouts_path = REPO_ROOT / "werewolf_reasoning"
 werewolf_rollouts = load_rollout_dialogues(werewolf_rollouts_path)

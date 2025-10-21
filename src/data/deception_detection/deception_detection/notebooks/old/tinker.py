@@ -7,12 +7,12 @@ from jaxtyping import Float
 from torch import Tensor
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
-from deception_detection.data.base import DialogueDataset
-from deception_detection.experiment import Experiment, ExperimentConfig
-from deception_detection.prompt_scorer import PromptScorer
-from deception_detection.tokenized_data import TokenizedDataset
-from deception_detection.types import Message
-from deception_detection.utils import (
+from .data.base import DialogueDataset
+from .experiment import Experiment, ExperimentConfig
+from .prompt_scorer import PromptScorer
+from .tokenized_data import TokenizedDataset
+from .types import Message
+from .utils import (
     REPO_ROOT,
     get_model_and_tokenizer,
     process_str_tokens,

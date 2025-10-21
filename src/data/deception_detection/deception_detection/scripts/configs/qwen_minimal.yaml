@@ -1,16 +1,15 @@
-method: "lr" # Literal["mms", "lat", "lr", "mlp", "cmms"]
+method: "lr"
 model_name: "qwen-0.5b"
 train_data: "repe_honesty__plain"
 eval_data:
-  # - "ai_liar__original_without_answers"
   - "roleplaying__plain"
 eval_on_policy: false
 control_data:
   - "alpaca__plain"
-id: "repe"
+id: "qwen_minimal"
 detect_only_start_of_turn: false
 val_fraction: 0.2
 control_on_policy: false
-control_dataset_size: 10000
-detect_layers: [22]
+control_dataset_size: 100
+detect_layers: [6, 12, 18]
 reg_coeff: 10

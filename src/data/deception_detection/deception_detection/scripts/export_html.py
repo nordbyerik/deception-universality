@@ -15,10 +15,10 @@ import torch
 from jaxtyping import Float
 from tqdm import tqdm
 
-from deception_detection.experiment import Experiment, ExperimentConfig
-from deception_detection.prompt_scorer import create_prompt_scorer
-from deception_detection.results.token_html import get_token_scores_html
-from deception_detection.results.utils import (
+from .experiment import Experiment, ExperimentConfig
+from .prompt_scorer import create_prompt_scorer
+from .results.token_html import get_token_scores_html
+from .results.utils import (
     AMBIGUOUS_COLOR,
     DECEPTIVE_COLOR,
     HONEST_COLOR,
@@ -26,8 +26,8 @@ from deception_detection.results.utils import (
     get_scores_from_name,
     to_readable_dataset_name,
 )
-from deception_detection.tokenized_data import TokenizedDataset
-from deception_detection.utils import REPO_ROOT
+from .tokenized_data import TokenizedDataset
+from .utils import REPO_ROOT
 
 # Datasets to exclude from HTML export
 EXCLUDED_DATASETS = {

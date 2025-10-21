@@ -7,7 +7,7 @@ from jaxtyping import Float
 from sklearn.metrics import roc_auc_score, roc_curve
 from torch import Tensor
 
-from deception_detection.log import logger
+from .log import logger
 
 """
 Note that our probes are trained such that "honest" is positive and "deceptive" is negative.    

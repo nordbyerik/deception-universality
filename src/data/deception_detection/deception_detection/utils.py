@@ -35,14 +35,11 @@ def get_dialogue_from_yaml(path: Path) -> Dialogue:
     with open(path) as f:
         data = yaml.safe_load(f)
     return [
-        Message(cast(Role, msg["role"]), cast(str, msg["content"]), False)
-        for msg in data["prompt"]
+        Message(cast(Role, msg["role"]), cast(str, msg["content"]), False) for msg in data["prompt"]
     ]
 
 
-def preprocess_dialogue(
-    dialogue: Dialogue, fold_system: bool = False
-) -> list[dict[str, str]]:
+def preprocess_dialogue(dialogue: Dialogue, fold_system: bool = False) -> list[dict[str, str]]:
     """Concatenate same-role messages, fold system if necessary, and convert to list of dicts.
 
     Concatenate adjacent same role messages:

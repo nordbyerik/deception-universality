@@ -1,16 +1,16 @@
 import pandas as pd
 
-from deception_detection.experiment import Experiment
-from deception_detection.prompt_scorer import PromptScorerMethod, create_prompt_scorer
-from deception_detection.repository import DatasetRepository
-from deception_detection.results import token_html
-from deception_detection.results.plot import (
+from .experiment import Experiment
+from .prompt_scorer import PromptScorerMethod, create_prompt_scorer
+from .repository import DatasetRepository
+from .results import token_html
+from .results.plot import (
     make_dataset_specific_plots,
     plot_roc_comparison,
     plot_roc_curve_with_auroc,
     violin_plot,
 )
-from deception_detection.types import Label
+from .types import Label
 
 REPOSITORY = DatasetRepository()
 FPRS = [0.01, 0.001]

@@ -16,19 +16,19 @@ from dotenv import load_dotenv
 from fire import Fire
 from tqdm import tqdm, trange
 
-from deception_detection.activations import PairedActivations
-from deception_detection.data import DialogueDataset
-from deception_detection.detectors import DirectionDetector, LogisticRegressionDetector
-from deception_detection.experiment import Experiment, ExperimentConfig
-from deception_detection.log import logger
-from deception_detection.metrics import get_auroc
-from deception_detection.models import ModelName
-from deception_detection.prompt_scorer import create_prompt_scorer
-from deception_detection.results.plot import save_plot_exp
-from deception_detection.results.utils import get_dataset_color, to_readable_dataset_name
-from deception_detection.scores import Scores
-from deception_detection.tokenized_data import TokenizedDataset
-from deception_detection.types import Label
+from .activations import PairedActivations
+from .data import DialogueDataset
+from .detectors import DirectionDetector, LogisticRegressionDetector
+from .experiment import Experiment, ExperimentConfig
+from .log import logger
+from .metrics import get_auroc
+from .models import ModelName
+from .prompt_scorer import create_prompt_scorer
+from .results.plot import save_plot_exp
+from .results.utils import get_dataset_color, to_readable_dataset_name
+from .scores import Scores
+from .tokenized_data import TokenizedDataset
+from .types import Label
 
 load_dotenv()
 

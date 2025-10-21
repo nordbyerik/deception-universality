@@ -10,7 +10,7 @@ from inspect_ai.log import EvalLog
 from inspect_ai.model import ChatMessage, GenerateConfig
 from inspect_ai.solver import generate
 
-from deception_detection.utils import REPO_ROOT
+from .utils import REPO_ROOT
 
 PREFIX = "Here is a simple roleplaying scenario."
 HONEST_POSTFIX = (

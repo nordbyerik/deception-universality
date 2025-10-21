@@ -2,8 +2,8 @@ from pathlib import Path
 
 import fire
 
-from deception_detection.detectors import DirectionDetector
-from deception_detection.experiment import Experiment, ExperimentConfig
+from .detectors import DirectionDetector
+from .experiment import Experiment, ExperimentConfig
 
 
 def print_detector_weights(exp_path: Path | str, k: int = 25):

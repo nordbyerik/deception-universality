@@ -8,14 +8,14 @@ import plotly.graph_objects as go
 from circuitsvis.tokens import colored_tokens
 from IPython.display import display
 
-from deception_detection.activations import Activations
-from deception_detection.data.base import RolloutDialogueDataset
-from deception_detection.data.geometry_of_truth import Cities
-from deception_detection.data.repe import RepeHonestDishonestFacts
-from deception_detection.detectors import MMSDetector
-from deception_detection.rollouts import load_rollout_dialogues
-from deception_detection.tokenized_data import TokenizedDataset, get_tokenized_dataset_pair
-from deception_detection.utils import get_gemma_model_and_tokenizer
+from .activations import Activations
+from .data.base import RolloutDialogueDataset
+from .data.geometry_of_truth import Cities
+from .data.repe import RepeHonestDishonestFacts
+from .detectors import MMSDetector
+from .rollouts import load_rollout_dialogues
+from .tokenized_data import TokenizedDataset, get_tokenized_dataset_pair
+from .utils import get_gemma_model_and_tokenizer
 
 model, tokenizer = get_gemma_model_and_tokenizer()
 

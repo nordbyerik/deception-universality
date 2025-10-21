@@ -8,12 +8,12 @@ import streamlit.components.v1 as components
 from jaxtyping import Float
 from torch import Tensor
 
-from deception_detection.experiment import Experiment, ExperimentConfig
-from deception_detection.prompt_scorer import create_prompt_scorer
-from deception_detection.results.token_html import get_token_scores_html
-from deception_detection.results.utils import get_dataframe_of_scores_on_dataset
-from deception_detection.scores import Scores
-from deception_detection.tokenized_data import TokenizedDataset
+from .experiment import Experiment, ExperimentConfig
+from .prompt_scorer import create_prompt_scorer
+from .results.token_html import get_token_scores_html
+from .results.utils import get_dataframe_of_scores_on_dataset
+from .scores import Scores
+from .tokenized_data import TokenizedDataset
 
 
 def display_token_scores(

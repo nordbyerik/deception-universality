@@ -5,12 +5,12 @@
 # import matplotlib.pyplot as plt
 # import torch
 
-# from deception_detection.activations import Activations
-# from deception_detection.experiment import Experiment, ExperimentConfig
-# from deception_detection.rollouts import load_rollout_dialogues
-# from deception_detection.tokenized_data import TokenizedDataset
-# from deception_detection.types import Dialogue, Message, RolloutDialogue
-# from deception_detection.utils import REPO_ROOT, get_gemma_model_and_tokenizer
+# from .activations import Activations
+# from .experiment import Experiment, ExperimentConfig
+# from .rollouts import load_rollout_dialogues
+# from .tokenized_data import TokenizedDataset
+# from .types import Dialogue, Message, RolloutDialogue
+# from .utils import REPO_ROOT, get_gemma_model_and_tokenizer
 
 # # %%
 # folder = REPO_ROOT / "deception_detection/writeup/results/mms_repe_9b_20240816_094155"

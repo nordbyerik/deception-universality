@@ -4,7 +4,8 @@ from typing import Any, cast
 
 import yaml
 
-from .base import Dialogue, DialogueDataset, DialogueDataType
+from . import Dialogue, DialogueDataset
+from .base import DialogueDataType
 from ..types import Label, Message
 from ..utils import REPO_ROOT, get_dialogue_from_yaml
 

@@ -5,7 +5,7 @@ from inspect_ai.model import Model, get_model
 from inspect_ai.scorer import Score, Scorer, Target, scorer
 from inspect_ai.solver import TaskState
 
-from deception_detection.scripts.roleplaying_data_generation.utils import extract_and_parse_json
+from .scripts.roleplaying_data_generation.utils import extract_and_parse_json
 
 
 class PromptError(Exception):

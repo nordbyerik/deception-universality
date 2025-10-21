@@ -1,6 +1,6 @@
 import json
 
-from deception_detection.utils import REPO_ROOT
+from .utils import REPO_ROOT
 
 with open(REPO_ROOT / "data/werewolf/rules.txt") as f:
     rules_text = f.read()

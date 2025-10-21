@@ -3,8 +3,8 @@ from jaxtyping import Float
 from torch import Tensor
 from tqdm import trange
 
-from deception_detection.activations import Activations
-from deception_detection.log import logger
+from .activations import Activations
+from .log import logger
 
 
 @torch.no_grad()

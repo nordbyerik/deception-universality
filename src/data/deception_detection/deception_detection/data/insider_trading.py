@@ -323,7 +323,7 @@ class InsiderTradingDoubleDown(DialogueDataset):
     def _get_dialogues(self) -> DialogueDataType:
         """Loads the deceptive subset of the llama-70b dataset on original insider trading and
         appends the necessary message for the doubling down variant."""
-        from deception_detection.repository import DatasetRepository
+        from .repository import DatasetRepository
 
         rollout_dataset = DatasetRepository().get(
             "insider_trading__onpolicy", model="llama-70b"

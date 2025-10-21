@@ -9,9 +9,9 @@ import torch
 from dotenv import load_dotenv
 from goodfire import Client
 
-from deception_detection.activations import PairedActivations
-from deception_detection.detectors import LogisticRegressionDetector
-from deception_detection.experiment import Experiment, ExperimentConfig
+from .activations import PairedActivations
+from .detectors import LogisticRegressionDetector
+from .experiment import Experiment, ExperimentConfig
 
 # %%
 

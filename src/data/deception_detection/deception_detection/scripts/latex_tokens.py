@@ -5,10 +5,10 @@ from pathlib import Path
 
 import fire
 
-from deception_detection.experiment import Experiment, ExperimentConfig
-from deception_detection.prompt_scorer import create_prompt_scorer
-from deception_detection.tokenized_data import TokenizedDataset
-from deception_detection.utils import process_str_tokens
+from .experiment import Experiment, ExperimentConfig
+from .prompt_scorer import create_prompt_scorer
+from .tokenized_data import TokenizedDataset
+from .utils import process_str_tokens
 
 
 @cache

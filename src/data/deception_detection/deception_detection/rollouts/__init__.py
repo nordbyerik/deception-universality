@@ -1,5 +1,5 @@
-from deception_detection.rollouts.rollout_dialogue import RolloutDialogue
-from deception_detection.rollouts.rollout_generator import RolloutGenerator
+from .rollouts.rollout_dialogue import RolloutDialogue
+from .rollouts.rollout_generator import RolloutGenerator
 
 __all__ = [
     "RolloutDialogue",

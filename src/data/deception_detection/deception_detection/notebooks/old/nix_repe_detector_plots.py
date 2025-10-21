@@ -4,19 +4,19 @@ from dataclasses import dataclass
 from matplotlib import pyplot as plt
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
-from deception_detection.activations import Activations
-from deception_detection.data import (
+from .activations import Activations
+from .data import (
     AILiarDataset,
     AlpacaDataset,
     PairedDialogueDataset,
     RepeHonestDishonestFacts,
     WerewolfPaired,
 )
-from deception_detection.detectors import (
+from .detectors import (
     MMSDetector,
 )
-from deception_detection.tokenized_data import TokenizedDataset, get_tokenized_dataset_pair
-from deception_detection.utils import get_gemma_model_and_tokenizer
+from .tokenized_data import TokenizedDataset, get_tokenized_dataset_pair
+from .utils import get_gemma_model_and_tokenizer
 
 
 # %%

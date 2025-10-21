@@ -9,7 +9,7 @@ from typing import Any
 
 import streamlit as st
 
-from deception_detection.rollouts.rollout_dialogue import RolloutDialogue
+from .rollouts.rollout_dialogue import RolloutDialogue
 
 
 def load_json(path: Path) -> dict[str, Any]:

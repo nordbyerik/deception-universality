@@ -6,17 +6,17 @@ from typing import Literal
 
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
-from deception_detection.activations import Activations
-from deception_detection.data import RepeHonestDishonestFacts
-from deception_detection.detectors import (
+from .activations import Activations
+from .data import RepeHonestDishonestFacts
+from .detectors import (
     DirectionDetector,
     LATDetector,
     LogisticRegressionDetector,
     MMSDetector,
 )
-from deception_detection.log import logger
-from deception_detection.tokenized_data import get_tokenized_dataset_pair
-from deception_detection.utils import REPO_ROOT
+from .log import logger
+from .tokenized_data import get_tokenized_dataset_pair
+from .utils import REPO_ROOT
 
 
 def get_repe_detector(

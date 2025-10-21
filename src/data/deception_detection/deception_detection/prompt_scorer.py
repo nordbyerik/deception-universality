@@ -6,11 +6,11 @@ import torch
 from jaxtyping import Float
 from torch import Tensor
 
-from deception_detection.experiment import Experiment
-from deception_detection.log import logger
-from deception_detection.metrics import get_auroc
-from deception_detection.scores import Scores
-from deception_detection.types import Label
+from .experiment import Experiment
+from .log import logger
+from .metrics import get_auroc
+from .scores import Scores
+from .types import Label
 
 PromptScorerMethod = Literal["mean", "max", "relu", "topk", "final"]
 

@@ -16,8 +16,8 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
-from deception_detection.data.base import PairedDialogueDataset
-from deception_detection.data.geometry_of_truth import (
+from .data.base import PairedDialogueDataset
+from .data.geometry_of_truth import (
     Animals,
     Cities,
     Elements,
@@ -28,8 +28,8 @@ from deception_detection.data.geometry_of_truth import (
     SpEnTrans,
     add_agents_to_geometry_of_truth_dataset,
 )
-from deception_detection.tokenized_data import TokenizedDataset
-from deception_detection.utils import ModelType, get_model_and_tokenizer
+from .tokenized_data import TokenizedDataset
+from .utils import ModelType, get_model_and_tokenizer
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

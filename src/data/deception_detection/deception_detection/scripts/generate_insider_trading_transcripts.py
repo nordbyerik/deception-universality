@@ -44,7 +44,7 @@ from inspect_ai.model import ChatMessage, ChatMessageUser, get_model
 from inspect_ai.solver import TaskState, solver
 from pydantic import BaseModel
 
-from deception_detection.utils import REPO_ROOT
+from .utils import REPO_ROOT
 
 dotenv.load_dotenv(REPO_ROOT / ".env", verbose=True, override=True)
 print(os.environ["XDG_RUNTIME_DIR"])

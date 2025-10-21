@@ -1,14 +1,13 @@
 from pathlib import Path
 
-import fire
 import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
 import torch
 
 from .experiment import Experiment, ExperimentConfig
-from .prompt_scorer import create_prompt_scorer
-from .results.utils import to_readable_dataset_name
+from .prompt_scorer import PromptScorerMethod, create_prompt_scorer
+from .results.utils import save_plot, to_readable_dataset_name
 from .scores import Scores
 from .types import Label
 
@@ -40,6 +39,7 @@ def get_aurocs_df(
     exp_for_black_box: Path | None = None,
     use_recall_for_control: bool = False,
     include_merged: bool = False,
+    separate_val_dataset_name: bool = False,
 ) -> pd.DataFrame:
     data = []
     for exp_folder in results_folder.iterdir():
@@ -61,7 +61,7 @@ def get_aurocs_df(
                     auroc_alpaca = scorer.recall_at_fpr(scores)
                 else:
                     auroc_alpaca = scorer.auroc_alpaca(scores)
-                readable_name = to_readable_dataset_name(dataset)
+                readable_name = to_readable_dataset_name(dataset, separate_val_dataset_name)
                 data.append(
                     {
                         label_key: exp_value_name,
@@ -95,6 +95,7 @@ def get_aurocs_df(
 
         except Exception as e:
             print(f"Failed to load results from {exp_folder}: {e}")
+            raise e
             continue
 
     if exp_for_black_box:
@@ -112,15 +113,21 @@ def get_aurocs_df(
 
             if use_recall_for_control:
                 split_scores = scores.get_scores_by_label()
-                alpaca_scores = exp.get_black_box_control_scores()["alpaca__plain"]
-                alpaca_threshold = torch.quantile(torch.tensor(alpaca_scores.scores), 0.99).item()
-                # generally alpaca_threshold is 6
-                # It's not clear which of >= or > is more principled (do you want FPR~0.3% or ~6%?)
-                # but the choice does significantly change the results.
-                is_over_threshold = (
-                    torch.tensor(split_scores[Label.DECEPTIVE].scores) >= alpaca_threshold
+                alpaca_scores = torch.tensor(
+                    exp.get_black_box_control_scores()["alpaca__plain"].scores
                 )
-                print(alpaca_threshold, is_over_threshold.float().mean().item())
+                alpaca_threshold = torch.nanquantile(alpaca_scores, 0.99).item()
+                print("Black box threshold", alpaca_threshold)
+                frac_over_threshold = (alpaca_scores >= alpaca_threshold).float().mean().item()
+                print(f"frac alpaca >= threshold {frac_over_threshold:.2%}")
+                frac_strictly_over_threshold = (
+                    (alpaca_scores > alpaca_threshold).float().mean().item()
+                )
+                print(f"frac alpaca > threshold {frac_strictly_over_threshold:.2%}")
+                print("using strict threshold")
+                is_over_threshold = (
+                    torch.tensor(split_scores[Label.DECEPTIVE].scores) > alpaca_threshold
+                )
                 auroc_alpaca = is_over_threshold.float().mean().item()
             else:
                 auroc_alpaca = float("nan")
@@ -161,6 +168,8 @@ def make_comparison_bar_chart(
     use_recall_for_control: bool = False,
     legend_title: str | None = None,
     include_merged: bool = False,
+    outfile: Path | None = None,
+    separate_val_dataset_name: bool = False,
 ) -> None:
     """
         Create a bar chart comparing AUROCs across different experiments.
@@ -180,9 +189,10 @@ def make_comparison_bar_chart(
         exp_for_black_box=exp_for_black_box,
         use_recall_for_control=use_recall_for_control,
         include_merged=include_merged,
+        separate_val_dataset_name=separate_val_dataset_name,
     )
     # Create the plot
-    _, axs = plt.subplots(2, 1, figsize=figsize, sharey=True)
+    _, axs = plt.subplots(2, 1, figsize=figsize, sharex=True)
 
     palette = {
         name: color
@@ -198,24 +208,105 @@ def make_comparison_bar_chart(
         "hue_order": list(value_names.values()),
         "palette": palette,
     }
-    sns.barplot(**kwargs, y="AUROC", ax=axs[0], legend=True)  # type: ignore
+    barplot = sns.barplot(**kwargs, y="AUROC", ax=axs[0], legend=True)  # type: ignore
     sns.barplot(**kwargs, y="AUROC vs Alpaca", ax=axs[1], legend=False)  # type: ignore
     axs[0].set_title("AUROC vs Honest")
     if use_recall_for_control:
         axs[1].set_title("Recall vs Control")
     else:
         axs[1].set_title("AUROC vs Control")
-    axs[0].legend(bbox_to_anchor=(1.02, 1), loc="upper left", title=legend_title)
     if use_recall_for_control:
         axs[1].set_ylabel(r"Recall at 1% FPR")
 
     plt.ylim(*y_lim)
+    axs[0].get_legend().remove()  # we need to make the legend to get handles but then remove it
+    plt.xlabel("")
+    handles, labels = barplot.get_legend_handles_labels()
+    plt.figlegend(handles, labels, bbox_to_anchor=(1.0, 0.5), loc="center left")
+    plt.tight_layout()
+
+    output_path = outfile or results_folder / "auroc_comparison.png"
+    save_plot(output_path)
+
+
+def make_reduction_comparison_bar_chart(
+    results_folder: Path,
+    score_methods: list[PromptScorerMethod],
+    figsize: tuple[float, float] = (8, 5),
+    excluded_datasets: set[str] | None = None,
+    y_mins: tuple[float, float] = (0.5, 1.0),
+    outfile: Path | None = None,
+    relu_threshold: float | None = None,
+    legend: bool = True,
+) -> None:
+    """
+        Create a bar chart comparing AUROCs across different experiments.
+    a
+        Args:
+            results_folder: Path to folder containing experiment results
+            label_key: Key in the experiment config to use for labeling experiments
+            value_names: Dictionary mapping experiment config values to names for the legend
+            figsize: Size of the figure (width, height)
+    """
+
+    exp = load_experiment(results_folder)
+    scorers = {
+        scoring_method: create_prompt_scorer(scoring_method, exp, fprs=[0.01], default_fpr=0.01)
+        for scoring_method in score_methods
+    }
+    if relu_threshold is not None:
+        scorers["relu"].relu_threshold = relu_threshold  # type: ignore
+    data = []
+    all_dataset_scores: list[Scores] = []
+    for scoring_method in score_methods:
+        scorer = scorers[scoring_method]
+        for dataset, scores in exp.get_eval_scores().items():
+            if excluded_datasets and dataset in excluded_datasets:
+                continue
+            all_dataset_scores.append(scores)
+
+            auroc = scorer.auroc(scores)
+            auroc_alpaca = scorer.recall_at_fpr(scores)
+            readable_name = to_readable_dataset_name(dataset)
+            data.append(
+                {
+                    "scoring_method": scoring_method,
+                    "Dataset": readable_name,
+                    "AUROC": auroc,
+                    "AUROC vs Alpaca": auroc_alpaca,
+                }
+            )
+
+    df = pd.DataFrame(data)
+    # Create the plot
+    plt.clf()
+    _, axs = plt.subplots(2, 1, figsize=figsize, sharex=True)
+
+    palette = {
+        name: color for name, color in zip(score_methods, sns.color_palette("deep"), strict=False)
+    }
+
+    kwargs = {
+        "data": df,
+        "x": "Dataset",
+        "hue": "scoring_method",
+        "hue_order": score_methods,
+        "palette": palette,
+    }
+    sns.barplot(**kwargs, y="AUROC", ax=axs[0], legend=legend)  # type: ignore
+    sns.barplot(**kwargs, y="AUROC vs Alpaca", ax=axs[1], legend=False)  # type: ignore
+    if legend:
+        axs[0].legend(bbox_to_anchor=(1.02, 1), loc="upper left", title="Reduction")
+    axs[1].set_ylabel(r"Recall at 1% FPR")
+
+    axs[0].set_ylim(y_mins[0], 1.0)
+    axs[1].set_ylim(y_mins[1], 1.0)
     axs[0].set_xlabel("")
     axs[1].set_xlabel("")
 
     plt.tight_layout()
-    output_path = results_folder / "auroc_comparison.png"
-    plt.savefig(output_path)
+    output_path = outfile or results_folder / "reduction_comparison.png"
+    save_plot(output_path)
 
 
 def make_comparison_point_plot(
@@ -268,94 +359,3 @@ def make_comparison_point_plot(
     plt.tight_layout()
     output_path = results_folder / "auroc_comparison_point.png"
     plt.savefig(output_path)
-
-
-def rp_off_policy_plot():
-    make_comparison_bar_chart(
-        results_folder=Path("results/rp_offpolicy"),
-        label_key="name",
-        value_names={
-            "mainline": "Mainline (RepE)",
-            "on_policy": "On Policy",
-            "off_policy": "Off Policy",
-            "mean_lr": "Mean before LR",
-            "last_token": "Last Token",
-        },
-        excluded_datasets={
-            "roleplaying__offpolicy_train",
-            "repe_honesty__plain",
-            "ai_audit__no_reasoning",
-        },
-    )
-
-
-def comparison_plot():
-    make_comparison_bar_chart(
-        results_folder=Path("results/comparisons"),
-        label_key="name",
-        # legend_title="Probe training set",
-        value_names={
-            "mainline": "Train on Instructed-Pairs",
-            "sae_repe": "Train on Instructed-Pairs\nSAE activations",
-            "roleplaying": "Train on Roleplaying",
-            "sae": "Train on Roleplaying\nSAE activations",
-            "descriptive": "Train on single\nDescriptive Question",
-            "black_box": "Black-Box baseline",
-        },
-        excluded_datasets={
-            "ai_audit__no_reasoning",
-            "repe_honesty__plain",
-            "ai_liar__original_without_answers",
-        },
-        exp_for_black_box=Path("results/comparisons/mainline"),
-        y_lim=(0.0, 1.0),
-        figsize=(10, 5),
-        use_recall_for_control=True,
-        # include_merged=True,
-    )
-
-
-def method_comparison_plot():
-    make_comparison_bar_chart(
-        results_folder=Path("results/by_method"),
-        label_key="name",
-        value_names={
-            "lr": "Logistic Regression",
-            "mms": "Difference of Means",
-            "cmms": "Linear Discriminant Analysis",
-            "lat": "Linear Artificial Tomography",
-        },
-        excluded_datasets={
-            "ai_audit__no_reasoning",
-            "repe_honesty__plain",
-            "ai_liar__original_without_answers",
-        },
-        y_lim=(0.0, 1.0),
-        figsize=(10, 5),
-        use_recall_for_control=True,
-    )
-
-
-def only_eot_comparison():
-    make_comparison_bar_chart(
-        results_folder=Path("results/vary_only_eot"),
-        label_key="name",
-        value_names={
-            "roleplaying": "entire response",
-            "roleplaying_only_eot": "last token",
-        },
-        use_recall_for_control=True,
-        excluded_datasets={"ai_liar__original_without_answers"},
-    )
-
-
-if __name__ == "__main__":
-    fire.Fire(
-        {
-            "plot": make_comparison_bar_chart,
-            "rp_off_policy": rp_off_policy_plot,
-            "comparison": comparison_plot,
-            "method": method_comparison_plot,
-            "eot": only_eot_comparison,
-        }
-    )

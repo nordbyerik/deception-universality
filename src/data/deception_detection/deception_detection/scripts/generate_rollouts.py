@@ -2,10 +2,10 @@ from pathlib import Path
 
 import fire
 
-from deception_detection.models import ModelName, get_model_and_tokenizer
-from deception_detection.repository import DatasetRepository
-from deception_detection.rollouts import RolloutGenerator
-from deception_detection.utils import REPO_ROOT
+from .models import ModelName, get_model_and_tokenizer
+from .repository import DatasetRepository
+from .rollouts import RolloutGenerator
+from .utils import REPO_ROOT
 
 
 def generate_rollouts(

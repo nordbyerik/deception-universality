@@ -17,8 +17,8 @@ from .log import logger
 
 # We only use the instruct variations of the models. Note not all sizes are available for all model
 # families.
-ModelType = Literal["gemma", "mistral", "llama"]
-ModelSize = Literal[1, 2, 3, 7, 8, 9, 27, 70]
+ModelType = Literal["gemma", "mistral", "llama", "qwen"]
+ModelSize = Literal[0.5, 1, 2, 3, 7, 8, 9, 27, 70]
 
 
 class ModelName(str, Enum):
@@ -31,6 +31,7 @@ class ModelName(str, Enum):
     LLAMA_8B = "llama-8b"
     LLAMA_70B = "llama-70b"
     LLAMA_70B_3_3 = "llama-70b-3.3"
+    QWEN_0_5B = "qwen-0.5b"
 
     @property
     def type(self) -> ModelType:
@@ -39,7 +40,7 @@ class ModelName(str, Enum):
     @property
     def size(self) -> ModelSize:
         size_str = self.value.split("-")[1].replace("b", "")
-        return cast(ModelSize, int(size_str))
+        return cast(ModelSize, float(size_str))
 
     @property
     def is_llama_3_3(self) -> bool:
@@ -55,6 +56,8 @@ def get_num_layers_for_model(model_name: ModelName) -> int:
         n_layers = {2: 26, 7: 32, 9: 42, 27: 46}
     elif model_name.type == "llama":
         n_layers = {1: 16, 3: 28, 8: 32, 70: 80, 405: 126}
+    elif model_name.type == "qwen":
+        n_layers = {0.5: 24}
     else:
         raise NotImplementedError(f"No number of layers for model {model_name}")
     return n_layers[model_name.size]
@@ -110,6 +113,8 @@ def get_model_and_tokenizer(
         )
     elif model_name.type == "llama":
         model, tokenizer = get_llama3_model_and_tokenizer(model_name, omit_model)
+    elif model_name.type == "qwen":
+        model, tokenizer = get_qwen_model_and_tokenizer(model_name, omit_model)
     else:
         raise ValueError(f"Invalid model type: {model_name.type}")
 
@@ -142,9 +147,7 @@ def get_gemma_model_and_tokenizer(
     dtype = torch.float16 if model_name.size < 9 else torch.bfloat16
 
     load_dotenv()  # for hf token
-    tokenizer = AutoTokenizer.from_pretrained(
-        "google/gemma-2-2b-it", padding_side="left"
-    )
+    tokenizer = AutoTokenizer.from_pretrained("google/gemma-2-2b-it", padding_side="left")
     tokenizer.pad_token_id = tokenizer.bos_token_id
 
     if omit_model:
@@ -255,4 +258,32 @@ def get_llama3_model_and_tokenizer(
     )
     model.eval()
 
+    return model, tokenizer
+
+
+@cache
+def get_qwen_model_and_tokenizer(
+    model_name: ModelName, omit_model: bool = False
+) -> tuple[PreTrainedModel | None, PreTrainedTokenizerBase]:
+    """Return Qwen model and tokenizer"""
+    if not model_name.type == "qwen":
+        raise ValueError(f"Expected Qwen model, got {model_name}")
+    
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct", padding_side="left")
+    tokenizer.pad_token_id = tokenizer.eos_token_id
+    
+    if omit_model:
+        return None, tokenizer
+    
+    model_path = {
+        ModelName.QWEN_0_5B: "Qwen/Qwen2.5-0.5B-Instruct",
+    }[model_name]
+    
+    model = AutoModelForCausalLM.from_pretrained(
+        model_path,
+        torch_dtype=torch.float16,
+        device_map="auto",
+    )
+    model.eval()
+    
     return model, tokenizer

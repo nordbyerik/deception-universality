@@ -16,9 +16,9 @@ from inspect_ai.dataset import Sample
 from inspect_ai.scorer import match
 from inspect_ai.solver import generate, prompt_template
 
-from deception_detection.detectors import LogisticRegressionDetector
-from deception_detection.experiment import Experiment, ExperimentConfig
-from deception_detection.utils import REPO_ROOT
+from .detectors import LogisticRegressionDetector
+from .experiment import Experiment, ExperimentConfig
+from .utils import REPO_ROOT
 
 # %%
 

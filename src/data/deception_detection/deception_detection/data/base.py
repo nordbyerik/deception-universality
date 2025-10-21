@@ -6,13 +6,7 @@ import numpy as np
 
 from ..log import logger
 from ..models import get_llama3_tokenizer
-from ..types import (
-    Dialogue,
-    DialogueDataType,
-    Judgement,
-    Label,
-    Message,
-)
+from ..types import Dialogue, DialogueDataType, Judgement, Label, Message
 from ..utils import preprocess_dialogue
 
 
@@ -74,6 +68,7 @@ class DialogueDataset:
         "gemma": {"left": 4, "right": 1},
         "mistral": {"left": 2, "right": 1},
         "llama": {"left": 4, "right": 1},
+        "qwen": {"left": 4, "right": 1},
     }
 
     # -- Instance attribute types--

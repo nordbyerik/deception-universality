@@ -6,9 +6,9 @@ from dataclasses import dataclass
 
 import streamlit as st
 
-from deception_detection.data.base import DialogueDataset
-from deception_detection.repository import DatasetRepository
-from deception_detection.types import Dialogue
+from .data.base import DialogueDataset
+from .repository import DatasetRepository
+from .types import Dialogue
 
 
 @dataclass

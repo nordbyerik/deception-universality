@@ -8,7 +8,7 @@ import pandas as pd
 from anthropic import Anthropic
 from tqdm import tqdm
 
-from deception_detection.utils import REPO_ROOT
+from .utils import REPO_ROOT
 
 PATHS = [
     # REPO_ROOT / "data/geometry_of_truth/cities.csv",

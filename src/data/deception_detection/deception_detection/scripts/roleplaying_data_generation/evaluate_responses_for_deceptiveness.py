@@ -9,7 +9,7 @@ from inspect_ai.dataset import MemoryDataset, Sample
 from inspect_ai.model import ChatMessage, GenerateConfig
 from inspect_ai.solver import generate
 
-from deception_detection.scripts.roleplaying_data_generation.scorers import response_grading
+from .scripts.roleplaying_data_generation.scorers import response_grading
 
 
 @task

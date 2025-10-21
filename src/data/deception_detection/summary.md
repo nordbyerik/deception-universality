@@ -38,7 +38,7 @@ To load a dataset, use the `deception_detection.repository.DatasetRepository` cl
 Here is an example of how to load the `ai_liar` dataset with the `original_with_answers` variant:
 
 ```python
-from deception_detection.repository import DatasetRepository
+from .repository import DatasetRepository
 
 # Instantiate the repository
 repo = DatasetRepository()
@@ -58,7 +58,7 @@ print(f"Number of labels: {len(dataset.labels)}")
 Some datasets are generated from model rollouts. To load these, you need to specify the model name in the `model` parameter. For example:
 
 ```python
-from deception_detection.repository import DatasetRepository
+from .repository import DatasetRepository
 
 repo = DatasetRepository()
 

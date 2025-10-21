@@ -9,8 +9,8 @@ import torch
 from tqdm import tqdm
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
-from deception_detection.activations import Activations
-from deception_detection.data import (
+from .activations import Activations
+from .data import (
     AILiarDataset,
     Animals,
     Cities,
@@ -29,18 +29,18 @@ from deception_detection.data import (
     TruthfulQA,
     WerewolfPaired,
 )
-from deception_detection.data.base import RolloutDialogueDataset
-from deception_detection.detectors import MMSDetector
-from deception_detection.metrics import get_auroc
-from deception_detection.results import (
+from .data.base import RolloutDialogueDataset
+from .detectors import MMSDetector
+from .metrics import get_auroc
+from .results import (
     GeneralizationResult,
     load_generalization_results,
     save_generalization_results,
 )
-from deception_detection.rollouts import load_rollout_dialogues
-from deception_detection.tokenized_data import TokenizedDataset, get_tokenized_dataset_pair
-from deception_detection.types import Dialogue
-from deception_detection.utils import get_gemma_model_and_tokenizer
+from .rollouts import load_rollout_dialogues
+from .tokenized_data import TokenizedDataset, get_tokenized_dataset_pair
+from .types import Dialogue
+from .utils import get_gemma_model_and_tokenizer
 
 
 @dataclass

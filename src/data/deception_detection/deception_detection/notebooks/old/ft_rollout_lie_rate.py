@@ -3,14 +3,14 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from deception_detection.rollouts import load_rollout_dialogues
-from deception_detection.scripts.experiment import (
+from .rollouts import load_rollout_dialogues
+from .scripts.experiment import (
     Experiment,
     ExperimentConfig,
     create_prompt_scorer,
 )
-from deception_detection.types import Dialogue
-from deception_detection.utils import REPO_ROOT, get_model_and_tokenizer
+from .types import Dialogue
+from .utils import REPO_ROOT, get_model_and_tokenizer
 
 # %%
 rollout_dialogues = load_rollout_dialogues(REPO_ROOT / "data/ft_fact_paired/out_simple_4_many.json")

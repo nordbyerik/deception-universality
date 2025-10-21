@@ -5,16 +5,16 @@ import numpy as np
 from circuitsvis.tokens import colored_tokens
 from IPython.display import display
 
-from deception_detection.activations import Activations
-from deception_detection.data.ai_liar import AILiarDataset
-from deception_detection.data.base import PairedDialogueDataset
-from deception_detection.data.geometry_of_truth import Cities
-from deception_detection.data.repe import RepeHonestDishonestFacts
-from deception_detection.detectors import DirectionDetector, LogisticRegressionDetector
-from deception_detection.metrics import get_auroc, get_fpr_tpr
-from deception_detection.rollouts import load_rollout_dialogues
-from deception_detection.tokenized_data import get_tokenized_dataset_pair
-from deception_detection.utils import get_gemma_model_and_tokenizer
+from .activations import Activations
+from .data.ai_liar import AILiarDataset
+from .data.base import PairedDialogueDataset
+from .data.geometry_of_truth import Cities
+from .data.repe import RepeHonestDishonestFacts
+from .detectors import DirectionDetector, LogisticRegressionDetector
+from .metrics import get_auroc, get_fpr_tpr
+from .rollouts import load_rollout_dialogues
+from .tokenized_data import get_tokenized_dataset_pair
+from .utils import get_gemma_model_and_tokenizer
 
 model, tokenizer = get_gemma_model_and_tokenizer()
 

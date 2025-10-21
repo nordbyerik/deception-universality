@@ -8,13 +8,13 @@ import pandas as pd
 import plotly.graph_objects as go
 import seaborn as sns
 
-from deception_detection.data.sandbagging_v2 import SandbaggingV2Dataset
-from deception_detection.experiment import Experiment, ExperimentConfig
-from deception_detection.prompt_scorer import create_prompt_scorer
-from deception_detection.repository import DatasetRepository
-from deception_detection.results.utils import get_dataframe_of_scores_on_dataset
-from deception_detection.scores import Scores
-from deception_detection.utils import REPO_ROOT
+from .data.sandbagging_v2 import SandbaggingV2Dataset
+from .experiment import Experiment, ExperimentConfig
+from .prompt_scorer import create_prompt_scorer
+from .repository import DatasetRepository
+from .results.utils import get_dataframe_of_scores_on_dataset
+from .scores import Scores
+from .utils import REPO_ROOT
 
 
 def sandbagging_data_labels_df() -> pd.DataFrame:

@@ -4,7 +4,7 @@ from collections import defaultdict
 import fire
 import plotly.graph_objects as go
 
-from deception_detection.utils import REPO_ROOT
+from .utils import REPO_ROOT
 
 BASE_FOLDER = REPO_ROOT / "data" / "insider_trading"
 

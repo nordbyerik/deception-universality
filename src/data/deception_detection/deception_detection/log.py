@@ -3,7 +3,7 @@
 To use the logger, import it in any module and use it as follows:
 
     ```
-    from deception_detection.log import logger
+    from .log import logger
 
     logger.info("Info message")
     logger.warning("Warning message")

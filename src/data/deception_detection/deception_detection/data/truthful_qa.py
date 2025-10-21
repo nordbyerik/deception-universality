@@ -2,14 +2,14 @@ from typing import cast
 
 import pandas as pd
 
-from deception_detection.data.base import (
+from .data.base import (
     Dialogue,
     DialogueDataset,
     DialogueDataType,
     Message,
 )
-from deception_detection.types import Label
-from deception_detection.utils import REPO_ROOT
+from .types import Label
+from .utils import REPO_ROOT
 
 
 class TruthfulQA(DialogueDataset):

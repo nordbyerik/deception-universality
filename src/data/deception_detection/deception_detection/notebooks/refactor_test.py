@@ -1,5 +1,5 @@
 # %%
-from deception_detection.repository import DatasetRepository
+from .repository import DatasetRepository
 
 # Initialize the DatasetRepository
 repository = DatasetRepository()

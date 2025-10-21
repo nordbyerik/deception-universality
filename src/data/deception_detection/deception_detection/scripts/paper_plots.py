@@ -3,13 +3,13 @@
 import fire
 import matplotlib
 
-from deception_detection.experiment import Experiment, ExperimentConfig
-from deception_detection.prompt_scorer import create_prompt_scorer
-from deception_detection.results.comparison_bar_chart import (
+from .experiment import Experiment, ExperimentConfig
+from .prompt_scorer import create_prompt_scorer
+from .results.comparison_bar_chart import (
     make_comparison_bar_chart,
     make_reduction_comparison_bar_chart,
 )
-from deception_detection.results.plot import (
+from .results.plot import (
     ai_audit_violin,
     ai_liar_roc_plot,
     ai_liar_violin,
@@ -17,12 +17,12 @@ from deception_detection.results.plot import (
     roleplaying_violin,
     violin_plot,
 )
-from deception_detection.results.plot_grid_of_detailed_results import (
+from .results.plot_grid_of_detailed_results import (
     ProbeConfig,
     plot_grid_of_detailed_results,
 )
-from deception_detection.scripts.by_reg_coeff import plot as plot_reg_sweep
-from deception_detection.utils import REPO_ROOT
+from .scripts.by_reg_coeff import plot as plot_reg_sweep
+from .utils import REPO_ROOT
 
 OUT_DIR = REPO_ROOT / "results/_plots"
 # OUT_DIR = REPO_ROO / "dd_overleaf/figures"

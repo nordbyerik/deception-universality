@@ -4,10 +4,10 @@ from typing import Any
 import matplotlib.pyplot as plt
 import torch
 
-from deception_detection.activations import Activations, SplitPairedActivations
-from deception_detection.data import AILiarDataset, RepeHonestDishonestFacts
-from deception_detection.sae import get_sae_acts
-from deception_detection.utils import REPO_ROOT, get_model_and_tokenizer
+from .activations import Activations, SplitPairedActivations
+from .data import AILiarDataset, RepeHonestDishonestFacts
+from .sae import get_sae_acts
+from .utils import REPO_ROOT, get_model_and_tokenizer
 
 OUT_FILE = REPO_ROOT / "deception_detection" / "notebooks" / "out" / "latent_selection"
 OUT_FILE.mkdir(parents=True, exist_ok=True)

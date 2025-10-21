@@ -4,12 +4,12 @@ from typing import Any
 
 from tqdm import tqdm
 
-from deception_detection.data.base import DialogueDataset
-from deception_detection.log import logger
-from deception_detection.rollouts.api import grade_single_dialogue_for_deception
-from deception_detection.scores import Scores
-from deception_detection.types import Dialogue, Judgement, Message
-from deception_detection.utils import REPO_ROOT
+from .data.base import DialogueDataset
+from .log import logger
+from .rollouts.api import grade_single_dialogue_for_deception
+from .scores import Scores
+from .types import Dialogue, Judgement, Message
+from .utils import REPO_ROOT
 
 BLACK_BOX_PROMPT_FILE = REPO_ROOT / "data" / "black_box_baseline" / "prompt.txt"
 BLACK_BOX_PROMPT = BLACK_BOX_PROMPT_FILE.read_text().strip()
