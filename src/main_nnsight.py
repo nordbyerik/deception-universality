@@ -14,6 +14,8 @@ from sklearn.preprocessing import StandardScaler
 from dataclasses import dataclass
 import pickle
 import argparse
+import h5py
+import hashlib
 
 from data.deception_detection.deception_detection.repository import DatasetRepository
 from data.deception_detection.deception_detection.utils import preprocess_dialogue
@@ -72,16 +74,22 @@ class NNsightActivationExtractor:
                 layer_indices.extend(middle_layers.tolist())
             return sorted(list(set(layer_indices)))
 
-    def extract_activations(
+    def extract_activations_all_layers(
         self,
         dataset: DialogueDataset,
-        layer_idx: int,
+        layer_indices: List[int],
+        cache_file: str,
         batch_size: int = 4,
         max_length: int = 512,
-    ) -> ActivationCache:
-        """Extract activations at all detection mask positions.
+    ) -> None:
+        """Extract activations from all specified layers in a single pass and save incrementally to HDF5.
 
-        Returns one activation vector per TOKEN (not per dialogue), matching the original implementation.
+        Args:
+            dataset: The dataset to extract activations from
+            layer_indices: List of layer indices to extract
+            cache_file: Path to HDF5 cache file
+            batch_size: Batch size for processing
+            max_length: Max sequence length
         """
         # Use their TokenizedDataset to get proper detection masks
         tokenized = TokenizedDataset.from_dataset(
@@ -90,9 +98,35 @@ class NNsightActivationExtractor:
             max_length=max_length,
         )
 
-        all_activations = []
-        all_labels = []
+        # Initialize HDF5 file with datasets for each layer
+        with h5py.File(cache_file, 'w') as f:
+            # Store metadata
+            f.attrs['num_layers'] = len(layer_indices)
+            f.attrs['layer_indices'] = layer_indices
+            f.attrs['hidden_size'] = self.hidden_size
 
+            # Create extensible datasets for each layer
+            for layer_idx in layer_indices:
+                f.create_dataset(
+                    f'layer_{layer_idx}',
+                    shape=(0, self.hidden_size),
+                    maxshape=(None, self.hidden_size),
+                    dtype='float32',
+                    chunks=True,
+                    compression='gzip',
+                    compression_opts=4
+                )
+
+            # Create dataset for labels (shared across all layers)
+            f.create_dataset(
+                'labels',
+                shape=(0,),
+                maxshape=(None,),
+                dtype='int32',
+                chunks=True
+            )
+
+        # Process batches and incrementally append to HDF5
         for i in range(0, len(tokenized), batch_size):
             batch_tokenized = tokenized[i : i + batch_size]
             batch_labels = dataset.labels[i : i + batch_size]
@@ -102,27 +136,78 @@ class NNsightActivationExtractor:
                     batch_tokenized.tokens,
                     attention_mask=batch_tokenized.attention_mask,
                 ):
-                    hidden_states = self.model.model.layers[layer_idx].output.save()
+                    # Save all layer outputs at once
+                    layer_outputs = {}
+                    for layer_idx in layer_indices:
+                        layer_outputs[layer_idx] = self.model.model.layers[layer_idx].output.save()
 
-                # hidden_states shape: [batch, seq, hidden_dim]
-                activations = hidden_states.cpu()
-
-                # Extract activations at detection mask positions
+                # Extract activations at detection mask positions for each layer
                 detection_mask = batch_tokenized.detection_mask
                 assert detection_mask is not None, "Detection mask is required"
 
-                # Get activations where mask is True
-                for j in range(len(batch_tokenized)):
-                    dialogue_acts = activations[j][detection_mask[j]]  # [num_detect_tokens, hidden_dim]
-                    all_activations.append(dialogue_acts)
-                    # Repeat label for each token in this dialogue
-                    label = 1 if batch_labels[j].value == "deceptive" else 0
-                    all_labels.extend([label] * len(dialogue_acts))
+                # Collect batch activations and labels
+                batch_activations = {layer_idx: [] for layer_idx in layer_indices}
+                batch_labels_collected = []
 
-        # Concatenate all tokens from all dialogues
+                for j in range(len(batch_tokenized)):
+                    mask_positions = detection_mask[j]
+                    label = 1 if batch_labels[j].value == "deceptive" else 0
+                    num_tokens = mask_positions.sum().item()
+
+                    # Extract for each layer
+                    for layer_idx in layer_indices:
+                        hidden_states = layer_outputs[layer_idx].cpu()
+                        dialogue_acts = hidden_states[j][mask_positions]  # [num_detect_tokens, hidden_dim]
+                        batch_activations[layer_idx].append(dialogue_acts)
+
+                    # Labels are same for all layers
+                    batch_labels_collected.extend([label] * num_tokens)
+
+                # Append to HDF5 file
+                with h5py.File(cache_file, 'a') as f:
+                    for layer_idx in layer_indices:
+                        # Concatenate batch activations for this layer
+                        layer_acts = torch.cat(batch_activations[layer_idx], dim=0).numpy()
+
+                        # Get current dataset
+                        dset = f[f'layer_{layer_idx}']
+                        current_size = dset.shape[0]
+                        new_size = current_size + layer_acts.shape[0]
+
+                        # Resize and append
+                        dset.resize(new_size, axis=0)
+                        dset[current_size:new_size] = layer_acts
+
+                    # Append labels (only once since shared)
+                    labels_dset = f['labels']
+                    current_size = labels_dset.shape[0]
+                    new_size = current_size + len(batch_labels_collected)
+                    labels_dset.resize(new_size, axis=0)
+                    labels_dset[current_size:new_size] = batch_labels_collected
+
+            logger.info(f"Processed batch {i//batch_size + 1}/{(len(tokenized) + batch_size - 1)//batch_size}")
+
+    def load_activations_from_cache(
+        self,
+        cache_file: str,
+        layer_idx: int,
+    ) -> ActivationCache:
+        """Load activations for a specific layer from HDF5 cache.
+
+        Args:
+            cache_file: Path to HDF5 cache file
+            layer_idx: Layer index to load
+
+        Returns:
+            ActivationCache with activations and labels for the specified layer
+        """
+        with h5py.File(cache_file, 'r') as f:
+            activations = torch.tensor(f[f'layer_{layer_idx}'][:], dtype=torch.float32)
+            labels = torch.tensor(f['labels'][:], dtype=torch.long)
+
         return ActivationCache(
-            activations=torch.cat(all_activations, dim=0),  # [total_tokens, hidden_dim]
-            labels=torch.tensor(all_labels),  # [total_tokens]
+            activations=activations,
+            labels=labels,
             layer_idx=layer_idx,
             hook_name=f"layer_{layer_idx}",
         )
@@ -317,6 +402,24 @@ def combine_datasets(
     return combined
 
 
+def get_cache_filename(
+    model_name: str,
+    dataset_names: List[str],
+    split: str,
+    max_length: int,
+    target_samples: Optional[int] = None,
+) -> str:
+    """Generate a unique cache filename based on parameters."""
+    # Create a hash of the key parameters
+    cache_key = f"{model_name}_{'+'.join(sorted(dataset_names))}_{split}_{max_length}_{target_samples}"
+    hash_suffix = hashlib.md5(cache_key.encode()).hexdigest()[:8]
+
+    cache_dir = "./activation_cache"
+    os.makedirs(cache_dir, exist_ok=True)
+
+    return os.path.join(cache_dir, f"activations_{hash_suffix}.h5")
+
+
 def save_results_to_csv(results: List[Dict], filename: str = "results.csv"):
     if not results:
         logger.warning("No results to save")
@@ -449,6 +552,41 @@ def main():
         layer_indices = extractor.select_layers()
         logger.info(f"Selected layers: {layer_indices}")
 
+        # Generate cache filenames
+        train_cache_file = get_cache_filename(
+            model_name, train_dataset_names, "train", args.max_length, target_samples_per_dataset
+        )
+        val_cache_file = get_cache_filename(
+            model_name, train_dataset_names, "val", args.max_length, target_samples_per_dataset
+        )
+
+        # Extract and cache activations if not already cached
+        if not os.path.exists(train_cache_file):
+            logger.info("Extracting train activations for all layers (this will be cached)...")
+            extractor.extract_activations_all_layers(
+                train_dataset,
+                layer_indices,
+                train_cache_file,
+                batch_size=args.batch_size,
+                max_length=args.max_length,
+            )
+            logger.info(f"Train activations cached to: {train_cache_file}")
+        else:
+            logger.info(f"Using cached train activations from: {train_cache_file}")
+
+        if not os.path.exists(val_cache_file):
+            logger.info("Extracting validation activations for all layers (this will be cached)...")
+            extractor.extract_activations_all_layers(
+                val_dataset,
+                layer_indices,
+                val_cache_file,
+                batch_size=args.batch_size,
+                max_length=args.max_length,
+            )
+            logger.info(f"Validation activations cached to: {val_cache_file}")
+        else:
+            logger.info(f"Using cached validation activations from: {val_cache_file}")
+
         all_probe_results = {}
         save_dir = "./probe_checkpoints_nnsight"
         os.makedirs(save_dir, exist_ok=True)
@@ -458,21 +596,10 @@ def main():
             logger.info(f"TRAINING PROBE FOR LAYER {layer_idx}")
             logger.info(f"{'='*40}")
 
-            logger.info(f"Extracting activations from layer {layer_idx}...")
-            # Extract from train dialogues
-            train_cache = extractor.extract_activations(
-                train_dataset,
-                layer_idx,
-                batch_size=args.batch_size,
-                max_length=args.max_length,
-            )
-            # Extract from val dialogues
-            val_cache = extractor.extract_activations(
-                val_dataset,
-                layer_idx,
-                batch_size=args.batch_size,
-                max_length=args.max_length,
-            )
+            logger.info(f"Loading activations from cache for layer {layer_idx}...")
+            # Load from cache
+            train_cache = extractor.load_activations_from_cache(train_cache_file, layer_idx)
+            val_cache = extractor.load_activations_from_cache(val_cache_file, layer_idx)
 
             logger.info(f"Train tokens: {len(train_cache.activations)}, Val tokens: {len(val_cache.activations)}")
 
@@ -522,14 +649,28 @@ def main():
 
         logger.info(f"TESTING PROBES ON {test_dataset_name.upper()} DATASET")
 
-        for layer_idx in layer_indices:
-            logger.info(f"\nExtracting test activations from layer {layer_idx}...")
-            test_cache = extractor.extract_activations(
+        # Generate cache filename for test set
+        test_cache_file = get_cache_filename(
+            model_name, [test_dataset_name], "test", args.max_length, None
+        )
+
+        # Extract and cache test activations if not already cached
+        if not os.path.exists(test_cache_file):
+            logger.info("Extracting test activations for all layers (this will be cached)...")
+            extractor.extract_activations_all_layers(
                 test_dataset,
-                layer_idx,
+                layer_indices,
+                test_cache_file,
                 batch_size=args.batch_size,
                 max_length=args.max_length,
             )
+            logger.info(f"Test activations cached to: {test_cache_file}")
+        else:
+            logger.info(f"Using cached test activations from: {test_cache_file}")
+
+        for layer_idx in layer_indices:
+            logger.info(f"\nLoading test activations from cache for layer {layer_idx}...")
+            test_cache = extractor.load_activations_from_cache(test_cache_file, layer_idx)
 
             probe = all_probe_results[layer_idx]["probe"]
             scaler = all_probe_results[layer_idx]["scaler"]

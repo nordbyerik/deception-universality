@@ -4,6 +4,7 @@ AGENTS.md
 samples/
 probe_checkpoints/
 probe_checkpoints_nnsight/
+probe_checkpoints_direct/
 activation_cache/
 cache/
 
