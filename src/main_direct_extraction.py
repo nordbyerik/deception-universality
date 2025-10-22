@@ -2,6 +2,7 @@
 
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
+from accelerate import Accelerator, PartialState
 import os
 from typing import Dict, List, Tuple, Optional
 import logging
@@ -39,18 +40,58 @@ class DirectActivationExtractor:
         model_name: str = "Qwen/Qwen3-0.6B",
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         max_layers: Optional[int] = None,
+        use_deepspeed: bool = True,
+        deepspeed_config: Optional[str] = None,
     ):
         self.model_name = model_name
         self.device = device
-        use_8bit = torch.cuda.is_available()
-        logger.info(f"Loading model {model_name} directly (device={device}, 8bit={use_8bit})...")
+        self.use_deepspeed = use_deepspeed
+
+        # Initialize accelerator with DeepSpeed if requested
+        if use_deepspeed:
+            # Create default DeepSpeed config if not provided
+            if deepspeed_config is None:
+                default_ds_config = {
+                    "train_micro_batch_size_per_gpu": 1,
+                    "gradient_accumulation_steps": 1,
+                    "zero_optimization": {
+                        "stage": 3,
+                        "offload_param": {"device": "cpu"},
+                        "offload_optimizer": {"device": "cpu"},
+                    },
+                    "fp16": {"enabled": torch.cuda.is_available()},
+                    "bf16": {"enabled": False},
+                }
+                self.accelerator = Accelerator(deepspeed_plugin=default_ds_config)
+            else:
+                # Load config from file
+                import json
+                with open(deepspeed_config, 'r') as f:
+                    ds_config = json.load(f)
+                self.accelerator = Accelerator(deepspeed_plugin=ds_config)
+
+            logger.info(f"DeepSpeed + Accelerate initialized")
+            logger.info(f"Device: {self.accelerator.device}, Num processes: {self.accelerator.num_processes}")
+            logger.info(f"Distributed type: {self.accelerator.distributed_type}")
+        else:
+            self.accelerator = Accelerator()
+            logger.info(f"Accelerate initialized (no DeepSpeed)")
+            logger.info(f"Device: {self.accelerator.device}")
+
+        use_8bit = torch.cuda.is_available() and not use_deepspeed  # Don't use 8bit with DeepSpeed
+        logger.info(f"Loading model {model_name} (8bit={use_8bit}, deepspeed={use_deepspeed})...")
 
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            device_map="auto",
+            device_map="auto" if not use_deepspeed else None,  # DeepSpeed handles device placement
             load_in_8bit=use_8bit,
             torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
         )
+
+        # Prepare model with accelerator (handles DeepSpeed integration)
+        if use_deepspeed:
+            self.model = self.accelerator.prepare(self.model)
+
         self.model.eval()
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -140,9 +181,10 @@ class DirectActivationExtractor:
 
             with torch.no_grad():
                 # Direct forward pass with output_hidden_states=True
+                target_device = self.accelerator.device if hasattr(self, 'accelerator') else self.device
                 outputs = self.model(
-                    input_ids=batch_tokenized.tokens.to(self.device),
-                    attention_mask=batch_tokenized.attention_mask.to(self.device),
+                    input_ids=batch_tokenized.tokens.to(target_device),
+                    attention_mask=batch_tokenized.attention_mask.to(target_device),
                     output_hidden_states=True,
                 )
 
@@ -494,6 +536,17 @@ def main():
         default=512,
         help="Maximum sequence length for tokenization (default: 512)",
     )
+    parser.add_argument(
+        "--no-deepspeed",
+        action="store_true",
+        help="Disable DeepSpeed (default: use DeepSpeed)",
+    )
+    parser.add_argument(
+        "--deepspeed-config",
+        type=str,
+        default=None,
+        help="Path to DeepSpeed config JSON file (optional, uses default ZeRO-3 config if not provided)",
+    )
 
     args = parser.parse_args()
 
@@ -514,7 +567,10 @@ def main():
     try:
         logger.info("--- Initializing direct extraction model ---")
         extractor = DirectActivationExtractor(
-            model_name=model_name, max_layers=args.max_layers
+            model_name=model_name,
+            max_layers=args.max_layers,
+            use_deepspeed=not args.no_deepspeed,
+            deepspeed_config=args.deepspeed_config,
         )
 
         logger.info(f"--- Loading training datasets: {train_dataset_names} ---")
