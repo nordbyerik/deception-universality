@@ -1,6 +1,17 @@
 #!/usr/bin/env python3
 
 import torch
+import torch.distributed as dist
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp.fully_sharded_data_parallel import (
+    CPUOffload,
+    BackwardPrefetch,
+)
+from torch.distributed.fsdp.wrap import (
+    size_based_auto_wrap_policy,
+    enable_wrap,
+    wrap,
+)
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
 import os
 from typing import Dict, List, Tuple, Optional
@@ -15,10 +26,9 @@ import pickle
 import argparse
 import h5py
 import hashlib
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from queue import Queue
 import threading
 import time
+import functools
 
 from data.deception_detection.deception_detection.repository import DatasetRepository
 from data.deception_detection.deception_detection.utils import preprocess_dialogue
@@ -27,6 +37,48 @@ from data.deception_detection.deception_detection.data import DialogueDataset
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def setup_distributed():
+    """Initialize distributed training environment."""
+    if not dist.is_initialized():
+        # Check if we're in a SLURM environment
+        if "SLURM_PROCID" in os.environ:
+            rank = int(os.environ["SLURM_PROCID"])
+            world_size = int(os.environ["SLURM_NTASKS"])
+            local_rank = int(os.environ["SLURM_LOCALID"])
+        # Check if we're using torchrun/torch.distributed.launch
+        elif "RANK" in os.environ:
+            rank = int(os.environ["RANK"])
+            world_size = int(os.environ["WORLD_SIZE"])
+            local_rank = int(os.environ["LOCAL_RANK"])
+        else:
+            # Not in a distributed environment - return None to disable FSDP
+            logger.warning(
+                "FSDP requested but not running with torchrun/SLURM. "
+                "Falling back to single-GPU mode. "
+                "To use FSDP, run with: torchrun --nproc_per_node=NUM_GPUS main_direct_extraction.py --use-fsdp"
+            )
+            return None, None, None
+
+        # Set device
+        torch.cuda.set_device(local_rank)
+
+        # Initialize process group
+        dist.init_process_group(
+            backend="nccl",
+            init_method="env://",
+            world_size=world_size,
+            rank=rank,
+        )
+
+    return dist.get_rank(), dist.get_world_size(), int(os.environ.get("LOCAL_RANK", 0))
+
+
+def cleanup_distributed():
+    """Cleanup distributed training."""
+    if dist.is_initialized():
+        dist.destroy_process_group()
 
 
 def get_available_gpus():
@@ -41,13 +93,15 @@ def get_available_gpus():
         allocated = torch.cuda.memory_allocated(i) / 1024**3
         free_memory = total_memory - allocated
 
-        gpu_info.append({
-            'id': i,
-            'name': props.name,
-            'total_gb': total_memory,
-            'free_gb': free_memory,
-            'allocated_gb': allocated,
-        })
+        gpu_info.append(
+            {
+                "id": i,
+                "name": props.name,
+                "total_gb": total_memory,
+                "free_gb": free_memory,
+                "allocated_gb": allocated,
+            }
+        )
     return gpu_info
 
 
@@ -59,7 +113,9 @@ def log_gpu_info(gpu_info):
 
     logger.info(f"Found {len(gpu_info)} GPU(s):")
     for gpu in gpu_info:
-        logger.info(f"  GPU {gpu['id']} ({gpu['name']}): {gpu['free_gb']:.2f}GB free / {gpu['total_gb']:.2f}GB total")
+        logger.info(
+            f"  GPU {gpu['id']} ({gpu['name']}): {gpu['free_gb']:.2f}GB free / {gpu['total_gb']:.2f}GB total"
+        )
 
 
 class GPUMonitor:
@@ -94,7 +150,11 @@ class GPUMonitor:
                 gpu_info = get_available_gpus()
                 logger.info("=== GPU Utilization Update ===")
                 for gpu in gpu_info:
-                    utilization_pct = (gpu['allocated_gb'] / gpu['total_gb']) * 100 if gpu['total_gb'] > 0 else 0
+                    utilization_pct = (
+                        (gpu["allocated_gb"] / gpu["total_gb"]) * 100
+                        if gpu["total_gb"] > 0
+                        else 0
+                    )
                     logger.info(
                         f"  GPU {gpu['id']}: {gpu['allocated_gb']:.2f}GB / {gpu['total_gb']:.2f}GB "
                         f"({utilization_pct:.1f}% utilized)"
@@ -107,14 +167,16 @@ def calculate_optimal_batch_size(gpu_info, base_batch_size=4):
         return base_batch_size
 
     num_gpus = len(gpu_info)
-    min_free_memory = min(gpu['free_gb'] for gpu in gpu_info)
+    min_free_memory = min(gpu["free_gb"] for gpu in gpu_info)
 
     # Increase batch size based on number of GPUs and available memory
     # With model parallelism, we want to keep the pipeline full
     if num_gpus > 1:
         # Pipeline depth: process multiple batches simultaneously
         optimal_batch_size = base_batch_size * num_gpus
-        logger.info(f"Using pipeline batch size: {optimal_batch_size} (base={base_batch_size} × {num_gpus} GPUs)")
+        logger.info(
+            f"Using pipeline batch size: {optimal_batch_size} (base={base_batch_size} × {num_gpus} GPUs)"
+        )
     else:
         optimal_batch_size = base_batch_size
         logger.info(f"Single GPU mode, using batch size: {optimal_batch_size}")
@@ -136,37 +198,82 @@ class DirectActivationExtractor:
         model_name: str = "Qwen/Qwen3-0.6B",
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         max_layers: Optional[int] = None,
+        use_fsdp: bool = False,
     ):
         self.model_name = model_name
         self.device = device
+        self.use_fsdp = use_fsdp
 
         # Detect available GPUs
         self.gpu_info = get_available_gpus()
         log_gpu_info(self.gpu_info)
 
-        use_8bit = torch.cuda.is_available()
-        logger.info(f"Loading model {model_name} directly (device={device}, 8bit={use_8bit})...")
+        if use_fsdp:
+            # Setup distributed environment for FSDP
+            result = setup_distributed()
+            if result[0] is None:
+                # Distributed setup failed, fall back to pipeline parallelism
+                logger.info("Falling back to pipeline parallelism mode...")
+                use_fsdp = False
+                self.use_fsdp = False
+                self.rank = 0
+                self.world_size = 1
+                self.local_rank = 0
+            else:
+                self.rank, self.world_size, self.local_rank = result
+                logger.info(f"FSDP: Rank {self.rank}/{self.world_size}, Local Rank {self.local_rank}")
 
-        # Use device_map="auto" for automatic multi-GPU distribution
-        # This will spread layers across all available GPUs
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            device_map="auto",
-            load_in_8bit=use_8bit,
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-        )
-        self.model.eval()
+                # Load model on CPU first, then wrap with FSDP
+                logger.info(f"Loading model {model_name} with FSDP...")
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+                )
+                model.eval()
 
-        # Log which layers are on which devices
-        if hasattr(self.model, 'hf_device_map'):
-            logger.info("Model layer distribution across GPUs:")
-            device_layers = {}
-            for layer_name, device in self.model.hf_device_map.items():
-                if device not in device_layers:
-                    device_layers[device] = []
-                device_layers[device].append(layer_name)
-            for device, layers in sorted(device_layers.items()):
-                logger.info(f"  {device}: {len(layers)} components")
+                # Wrap model with FSDP
+                # Auto-wrap policy based on size (100M parameters per shard)
+                auto_wrap_policy = functools.partial(
+                    size_based_auto_wrap_policy, min_num_params=100_000_000
+                )
+
+                self.model = FSDP(
+                    model,
+                    auto_wrap_policy=auto_wrap_policy,
+                    device_id=torch.cuda.current_device(),
+                    mixed_precision=None,  # We'll use fp16 from model
+                    backward_prefetch=BackwardPrefetch.BACKWARD_PRE,
+                    cpu_offload=None,  # Keep everything on GPU for inference
+                )
+
+                logger.info(f"Model wrapped with FSDP on rank {self.rank}")
+
+        # Load model with pipeline parallelism if not using FSDP
+        if not self.use_fsdp:
+            # Original pipeline parallelism approach without quantization
+            # Set rank to 0 for non-distributed mode
+            self.rank = 0
+            self.world_size = 1
+            self.local_rank = 0
+
+            logger.info(f"Loading model {model_name} with pipeline parallelism...")
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                device_map="auto",
+                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+            )
+            self.model.eval()
+
+            # Log which layers are on which devices
+            if hasattr(self.model, "hf_device_map"):
+                logger.info("Model layer distribution across GPUs:")
+                device_layers = {}
+                for layer_name, device in self.model.hf_device_map.items():
+                    if device not in device_layers:
+                        device_layers[device] = []
+                    device_layers[device].append(layer_name)
+                for device, layers in sorted(device_layers.items()):
+                    logger.info(f"  {device}: {len(layers)} components")
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         if self.tokenizer.pad_token is None:
@@ -223,58 +330,67 @@ class DirectActivationExtractor:
             max_length=max_length,
         )
 
-        # Set pipeline depth based on number of GPUs
-        if pipeline_depth is None:
-            pipeline_depth = max(1, self.num_gpus)
-
-        logger.info(f"Using pipeline depth: {pipeline_depth} (keeping {pipeline_depth} batches in flight)")
+        # Note: pipeline_depth parameter is ignored - we process batches sequentially
+        # FSDP handles data parallelism, pipeline parallelism handles layer distribution
 
         # Start GPU monitoring
         gpu_monitor = GPUMonitor(interval=30)
         gpu_monitor.start()
 
-        # Initialize HDF5 file with datasets for each layer
-        with h5py.File(cache_file, 'w') as f:
-            # Store metadata
-            f.attrs['num_layers'] = len(layer_indices)
-            f.attrs['layer_indices'] = layer_indices
-            f.attrs['hidden_size'] = self.hidden_size
+        # For FSDP, only rank 0 should write to cache
+        should_write = not self.use_fsdp or (self.use_fsdp and self.rank == 0)
 
-            # Create extensible datasets for each layer
-            for layer_idx in layer_indices:
+        # Initialize HDF5 file with datasets for each layer (only rank 0)
+        if should_write:
+            with h5py.File(cache_file, "w") as f:
+                # Store metadata
+                f.attrs["num_layers"] = len(layer_indices)
+                f.attrs["layer_indices"] = layer_indices
+                f.attrs["hidden_size"] = self.hidden_size
+
+                # Create extensible datasets for each layer
+                for layer_idx in layer_indices:
+                    f.create_dataset(
+                        f"layer_{layer_idx}",
+                        shape=(0, self.hidden_size),
+                        maxshape=(None, self.hidden_size),
+                        dtype="float32",
+                        chunks=True,
+                        compression="gzip",
+                        compression_opts=4,
+                    )
+
+                # Create dataset for labels (shared across all layers)
                 f.create_dataset(
-                    f'layer_{layer_idx}',
-                    shape=(0, self.hidden_size),
-                    maxshape=(None, self.hidden_size),
-                    dtype='float32',
-                    chunks=True,
-                    compression='gzip',
-                    compression_opts=4
+                    "labels", shape=(0,), maxshape=(None,), dtype="int32", chunks=True
                 )
 
-            # Create dataset for labels (shared across all layers)
-            f.create_dataset(
-                'labels',
-                shape=(0,),
-                maxshape=(None,),
-                dtype='int32',
-                chunks=True
-            )
+        # Synchronize all processes before starting extraction
+        if self.use_fsdp:
+            dist.barrier()
 
-        # Process batches with pipelined execution
-        # Use a queue to manage concurrent batch processing
-        batch_queue = Queue(maxsize=pipeline_depth)
-        write_lock = threading.Lock()
+        # Process batches sequentially
+        # With FSDP, all ranks process but only rank 0 writes
         total_batches = (len(tokenized) + batch_size - 1) // batch_size
 
-        def process_batch(batch_idx, batch_tokenized, batch_labels):
-            """Process a single batch and return results."""
+        for i in range(0, len(tokenized), batch_size):
+            batch_idx = i // batch_size
+            batch_tokenized = tokenized[i : i + batch_size]
+            batch_labels = dataset.labels[i : i + batch_size]
+
+            # Process batch
             with torch.no_grad():
                 # Direct forward pass with output_hidden_states=True
-                # Note: inputs are automatically moved to correct devices by device_map
+                if self.use_fsdp:
+                    # For FSDP, move to current device
+                    device = torch.cuda.current_device()
+                else:
+                    # For pipeline parallelism, use self.device
+                    device = self.device
+
                 outputs = self.model(
-                    input_ids=batch_tokenized.tokens.to(self.device),
-                    attention_mask=batch_tokenized.attention_mask.to(self.device),
+                    input_ids=batch_tokenized.tokens.to(device),
+                    attention_mask=batch_tokenized.attention_mask.to(device),
                     output_hidden_states=True,
                 )
 
@@ -298,25 +414,26 @@ class DirectActivationExtractor:
 
                     # Extract for each layer
                     for layer_idx in layer_indices:
-                        hidden_states = all_hidden_states[layer_idx + 1].cpu()  # +1 because index 0 is embeddings
-                        dialogue_acts = hidden_states[j][mask_positions]  # [num_detect_tokens, hidden_dim]
+                        hidden_states = all_hidden_states[
+                            layer_idx + 1
+                        ].cpu()  # +1 because index 0 is embeddings
+                        dialogue_acts = hidden_states[j][
+                            mask_positions
+                        ]  # [num_detect_tokens, hidden_dim]
                         batch_activations[layer_idx].append(dialogue_acts)
 
                     # Labels are same for all layers
                     batch_labels_collected.extend([label] * num_tokens)
 
-                return batch_idx, batch_activations, batch_labels_collected
-
-        def write_batch_to_hdf5(batch_idx, batch_activations, batch_labels_collected):
-            """Write batch results to HDF5 file."""
-            with write_lock:
-                with h5py.File(cache_file, 'a') as f:
+            # Write batch results to HDF5 file (only rank 0 for FSDP)
+            if should_write:
+                with h5py.File(cache_file, "a") as f:
                     for layer_idx in layer_indices:
                         # Concatenate batch activations for this layer
                         layer_acts = torch.cat(batch_activations[layer_idx], dim=0).numpy()
 
                         # Get current dataset
-                        dset = f[f'layer_{layer_idx}']
+                        dset = f[f"layer_{layer_idx}"]
                         current_size = dset.shape[0]
                         new_size = current_size + layer_acts.shape[0]
 
@@ -325,37 +442,18 @@ class DirectActivationExtractor:
                         dset[current_size:new_size] = layer_acts
 
                     # Append labels (only once since shared)
-                    labels_dset = f['labels']
+                    labels_dset = f["labels"]
                     current_size = labels_dset.shape[0]
                     new_size = current_size + len(batch_labels_collected)
                     labels_dset.resize(new_size, axis=0)
                     labels_dset[current_size:new_size] = batch_labels_collected
 
-                logger.info(f"Processed batch {batch_idx + 1}/{total_batches}")
+                if self.rank == 0 or not self.use_fsdp:
+                    logger.info(f"Processed batch {batch_idx + 1}/{total_batches}")
 
-        # Use ThreadPoolExecutor for parallel batch processing
-        with ThreadPoolExecutor(max_workers=pipeline_depth) as executor:
-            futures = []
-
-            for i in range(0, len(tokenized), batch_size):
-                batch_idx = i // batch_size
-                batch_tokenized = tokenized[i : i + batch_size]
-                batch_labels = dataset.labels[i : i + batch_size]
-
-                # Submit batch for processing
-                future = executor.submit(process_batch, batch_idx, batch_tokenized, batch_labels)
-                futures.append(future)
-
-                # If we have enough batches in flight, wait for one to complete and write it
-                if len(futures) >= pipeline_depth:
-                    completed_future = futures.pop(0)
-                    batch_idx, batch_activations, batch_labels_collected = completed_future.result()
-                    write_batch_to_hdf5(batch_idx, batch_activations, batch_labels_collected)
-
-            # Process remaining futures
-            for future in futures:
-                batch_idx, batch_activations, batch_labels_collected = future.result()
-                write_batch_to_hdf5(batch_idx, batch_activations, batch_labels_collected)
+            # Synchronize after each batch for FSDP
+            if self.use_fsdp:
+                dist.barrier()
 
         # Stop GPU monitoring
         gpu_monitor.stop()
@@ -374,9 +472,9 @@ class DirectActivationExtractor:
         Returns:
             ActivationCache with activations and labels for the specified layer
         """
-        with h5py.File(cache_file, 'r') as f:
-            activations = torch.tensor(f[f'layer_{layer_idx}'][:], dtype=torch.float32)
-            labels = torch.tensor(f['labels'][:], dtype=torch.long)
+        with h5py.File(cache_file, "r") as f:
+            activations = torch.tensor(f[f"layer_{layer_idx}"][:], dtype=torch.float32)
+            labels = torch.tensor(f["labels"][:], dtype=torch.long)
 
         return ActivationCache(
             activations=activations,
@@ -663,6 +761,17 @@ def main():
         default=None,
         help="Number of batches to process in parallel (default: auto-detect based on GPU count)",
     )
+    parser.add_argument(
+        "--reset-cache",
+        type=bool,
+        default=True,
+        help="Whether to reset activation cache (default: True)",
+    )
+    parser.add_argument(
+        "--use-fsdp",
+        action="store_true",
+        help="Use FSDP for multi-GPU distribution (requires no quantization)",
+    )
 
     args = parser.parse_args()
 
@@ -690,18 +799,19 @@ def main():
 
         # Initialize extractor (will load model across GPUs)
         extractor = DirectActivationExtractor(
-            model_name=model_name, max_layers=args.max_layers
+            model_name=model_name, max_layers=args.max_layers, use_fsdp=args.use_fsdp
         )
 
         # Calculate optimal batch size based on GPU count
         optimal_batch_size = calculate_optimal_batch_size(
-            extractor.gpu_info,
-            base_batch_size=args.batch_size
+            extractor.gpu_info, base_batch_size=args.batch_size
         )
 
         # Override batch size if auto-calculated
         if len(extractor.gpu_info) > 1:
-            logger.info(f"Multi-GPU detected: adjusting batch processing for pipeline parallelism")
+            logger.info(
+                f"Multi-GPU detected: adjusting batch processing for pipeline parallelism"
+            )
             # We keep the base batch size but increase pipeline depth
             actual_batch_size = args.batch_size
         else:
@@ -719,11 +829,13 @@ def main():
         combined_dataset = combine_datasets(
             train_datasets,
             train_dataset_names,
-            target_samples_per_dataset if len(train_dataset_names) > 1 else None
+            target_samples_per_dataset if len(train_dataset_names) > 1 else None,
         )
 
         logger.info(f"Total training dialogues: {len(combined_dataset.dialogues)}")
-        deceptive_count = sum(1 for l in combined_dataset.labels if l.value == "deceptive")
+        deceptive_count = sum(
+            1 for l in combined_dataset.labels if l.value == "deceptive"
+        )
         logger.info(
             f"Label distribution: {deceptive_count} deceptive, {len(combined_dataset.labels) - deceptive_count} honest"
         )
@@ -731,16 +843,27 @@ def main():
         # Split dataset at dialogue level
         logger.info("--- Creating train/validation splits ---")
         from copy import deepcopy
+
         num_dialogues = len(combined_dataset.dialogues)
         num_val = int(num_dialogues * 0.2)
 
         # Sequential split (matching the original implementation)
         train_dataset = deepcopy(combined_dataset)
-        train_dataset.dialogues = combined_dataset.dialogues[:-num_val] if num_val > 0 else combined_dataset.dialogues
-        train_dataset.labels = combined_dataset.labels[:-num_val] if num_val > 0 else combined_dataset.labels
+        train_dataset.dialogues = (
+            combined_dataset.dialogues[:-num_val]
+            if num_val > 0
+            else combined_dataset.dialogues
+        )
+        train_dataset.labels = (
+            combined_dataset.labels[:-num_val]
+            if num_val > 0
+            else combined_dataset.labels
+        )
 
         val_dataset = deepcopy(combined_dataset)
-        val_dataset.dialogues = combined_dataset.dialogues[-num_val:] if num_val > 0 else []
+        val_dataset.dialogues = (
+            combined_dataset.dialogues[-num_val:] if num_val > 0 else []
+        )
         val_dataset.labels = combined_dataset.labels[-num_val:] if num_val > 0 else []
 
         logger.info(
@@ -754,15 +877,29 @@ def main():
 
         # Generate cache filenames
         train_cache_file = get_cache_filename(
-            model_name, train_dataset_names, "train", args.max_length, target_samples_per_dataset
+            model_name,
+            train_dataset_names,
+            "train",
+            args.max_length,
+            target_samples_per_dataset,
         )
         val_cache_file = get_cache_filename(
-            model_name, train_dataset_names, "val", args.max_length, target_samples_per_dataset
+            model_name,
+            train_dataset_names,
+            "val",
+            args.max_length,
+            target_samples_per_dataset,
         )
 
+        if os.path.exists(train_cache_file) and args.reset_cache:
+            os.remove(train_cache_file)
+        if os.path.exists(val_cache_file) and args.reset_cache:
+            os.remove(val_cache_file)
         # Extract and cache activations if not already cached
         if not os.path.exists(train_cache_file):
-            logger.info("Extracting train activations for all layers (this will be cached)...")
+            logger.info(
+                "Extracting train activations for all layers (this will be cached)..."
+            )
             logger.info(f"GPU status before extraction:")
             log_gpu_info(get_available_gpus())
 
@@ -782,7 +919,9 @@ def main():
             logger.info(f"Using cached train activations from: {train_cache_file}")
 
         if not os.path.exists(val_cache_file):
-            logger.info("Extracting validation activations for all layers (this will be cached)...")
+            logger.info(
+                "Extracting validation activations for all layers (this will be cached)..."
+            )
             logger.info(f"GPU status before extraction:")
             log_gpu_info(get_available_gpus())
 
@@ -812,13 +951,19 @@ def main():
 
             logger.info(f"Loading activations from cache for layer {layer_idx}...")
             # Load from cache
-            train_cache = extractor.load_activations_from_cache(train_cache_file, layer_idx)
+            train_cache = extractor.load_activations_from_cache(
+                train_cache_file, layer_idx
+            )
             val_cache = extractor.load_activations_from_cache(val_cache_file, layer_idx)
 
-            logger.info(f"Train tokens: {len(train_cache.activations)}, Val tokens: {len(val_cache.activations)}")
+            logger.info(
+                f"Train tokens: {len(train_cache.activations)}, Val tokens: {len(val_cache.activations)}"
+            )
 
             # Combine and create indices for the probe training function
-            all_acts = torch.cat([train_cache.activations, val_cache.activations], dim=0)
+            all_acts = torch.cat(
+                [train_cache.activations, val_cache.activations], dim=0
+            )
             all_labels = torch.cat([train_cache.labels, val_cache.labels], dim=0)
             train_indices = list(range(len(train_cache.activations)))
             val_indices = list(range(len(train_cache.activations), len(all_acts)))
@@ -870,7 +1015,9 @@ def main():
 
         # Extract and cache test activations if not already cached
         if not os.path.exists(test_cache_file):
-            logger.info("Extracting test activations for all layers (this will be cached)...")
+            logger.info(
+                "Extracting test activations for all layers (this will be cached)..."
+            )
             logger.info(f"GPU status before extraction:")
             log_gpu_info(get_available_gpus())
 
@@ -890,8 +1037,12 @@ def main():
             logger.info(f"Using cached test activations from: {test_cache_file}")
 
         for layer_idx in layer_indices:
-            logger.info(f"\nLoading test activations from cache for layer {layer_idx}...")
-            test_cache = extractor.load_activations_from_cache(test_cache_file, layer_idx)
+            logger.info(
+                f"\nLoading test activations from cache for layer {layer_idx}..."
+            )
+            test_cache = extractor.load_activations_from_cache(
+                test_cache_file, layer_idx
+            )
 
             probe = all_probe_results[layer_idx]["probe"]
             scaler = all_probe_results[layer_idx]["scaler"]
@@ -931,7 +1082,9 @@ def main():
         logger.info(
             f"Training datasets: {', '.join(train_dataset_names)} ({len(train_dataset.dialogues)} train + {len(val_dataset.dialogues)} val dialogues)"
         )
-        logger.info(f"Test dataset: {test_dataset_name} ({len(test_dataset.dialogues)} dialogues)")
+        logger.info(
+            f"Test dataset: {test_dataset_name} ({len(test_dataset.dialogues)} dialogues)"
+        )
         logger.info(f"Results saved to: {args.output} ({len(all_results)} rows)")
         logger.info("=" * 60)
 
@@ -939,6 +1092,10 @@ def main():
         logger.error(
             f"An unexpected error occurred in the main process: {e}", exc_info=True
         )
+    finally:
+        # Cleanup distributed if using FSDP
+        if args.use_fsdp:
+            cleanup_distributed()
 
 
 if __name__ == "__main__":
