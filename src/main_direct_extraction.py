@@ -257,10 +257,27 @@ class DirectActivationExtractor:
             self.local_rank = 0
 
             logger.info(f"Loading model {model_name} with pipeline parallelism...")
+            # Clear GPU cache before loading
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                logger.info("Cleared CUDA cache before loading model")
+
+                # Calculate max memory per GPU dynamically (leave 1GB buffer)
+                max_memory = {}
+                for i in range(torch.cuda.device_count()):
+                    props = torch.cuda.get_device_properties(i)
+                    total_memory_gb = props.total_memory / 1024**3
+                    max_memory[i] = f"{total_memory_gb - 1:.1f}GB"
+                logger.info(f"Max memory per GPU: {max_memory}")
+            else:
+                max_memory = None
+
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_name,
                 device_map="auto",
                 torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+                low_cpu_mem_usage=True,
+                max_memory=max_memory,
             )
             self.model.eval()
 
