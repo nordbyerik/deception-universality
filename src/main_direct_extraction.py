@@ -2,7 +2,7 @@
 
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
-from accelerate import Accelerator, PartialState
+from accelerate import Accelerator, PartialState, DeepSpeedPlugin
 import os
 from typing import Dict, List, Tuple, Optional
 import logging
@@ -62,13 +62,15 @@ class DirectActivationExtractor:
                     "fp16": {"enabled": torch.cuda.is_available()},
                     "bf16": {"enabled": False},
                 }
-                self.accelerator = Accelerator(deepspeed_plugin=default_ds_config)
+                ds_plugin = DeepSpeedPlugin(hf_ds_config=default_ds_config)
+                self.accelerator = Accelerator(deepspeed_plugin=ds_plugin)
             else:
                 # Load config from file
                 import json
                 with open(deepspeed_config, 'r') as f:
                     ds_config = json.load(f)
-                self.accelerator = Accelerator(deepspeed_plugin=ds_config)
+                ds_plugin = DeepSpeedPlugin(hf_ds_config=ds_config)
+                self.accelerator = Accelerator(deepspeed_plugin=ds_plugin)
 
             logger.info(f"DeepSpeed + Accelerate initialized")
             logger.info(f"Device: {self.accelerator.device}, Num processes: {self.accelerator.num_processes}")
