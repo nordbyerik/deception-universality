@@ -15,6 +15,10 @@ import pickle
 import argparse
 import h5py
 import hashlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from queue import Queue
+import threading
+import time
 
 from data.deception_detection.deception_detection.repository import DatasetRepository
 from data.deception_detection.deception_detection.utils import preprocess_dialogue
@@ -23,6 +27,99 @@ from data.deception_detection.deception_detection.data import DialogueDataset
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def get_available_gpus():
+    """Detect available GPUs and their memory."""
+    if not torch.cuda.is_available():
+        return []
+
+    gpu_info = []
+    for i in range(torch.cuda.device_count()):
+        props = torch.cuda.get_device_properties(i)
+        total_memory = props.total_memory / 1024**3  # GB
+        allocated = torch.cuda.memory_allocated(i) / 1024**3
+        free_memory = total_memory - allocated
+
+        gpu_info.append({
+            'id': i,
+            'name': props.name,
+            'total_gb': total_memory,
+            'free_gb': free_memory,
+            'allocated_gb': allocated,
+        })
+    return gpu_info
+
+
+def log_gpu_info(gpu_info):
+    """Log GPU availability and usage."""
+    if not gpu_info:
+        logger.info("No GPUs available")
+        return
+
+    logger.info(f"Found {len(gpu_info)} GPU(s):")
+    for gpu in gpu_info:
+        logger.info(f"  GPU {gpu['id']} ({gpu['name']}): {gpu['free_gb']:.2f}GB free / {gpu['total_gb']:.2f}GB total")
+
+
+class GPUMonitor:
+    """Monitor GPU utilization in background thread."""
+
+    def __init__(self, interval=30):
+        self.interval = interval
+        self.running = False
+        self.thread = None
+
+    def start(self):
+        """Start monitoring."""
+        if not torch.cuda.is_available():
+            return
+
+        self.running = True
+        self.thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        self.thread.start()
+        logger.info(f"Started GPU monitoring (reporting every {self.interval}s)")
+
+    def stop(self):
+        """Stop monitoring."""
+        self.running = False
+        if self.thread:
+            self.thread.join(timeout=2)
+
+    def _monitor_loop(self):
+        """Background monitoring loop."""
+        while self.running:
+            time.sleep(self.interval)
+            if self.running:
+                gpu_info = get_available_gpus()
+                logger.info("=== GPU Utilization Update ===")
+                for gpu in gpu_info:
+                    utilization_pct = (gpu['allocated_gb'] / gpu['total_gb']) * 100 if gpu['total_gb'] > 0 else 0
+                    logger.info(
+                        f"  GPU {gpu['id']}: {gpu['allocated_gb']:.2f}GB / {gpu['total_gb']:.2f}GB "
+                        f"({utilization_pct:.1f}% utilized)"
+                    )
+
+
+def calculate_optimal_batch_size(gpu_info, base_batch_size=4):
+    """Calculate optimal batch size based on available GPU memory and count."""
+    if not gpu_info:
+        return base_batch_size
+
+    num_gpus = len(gpu_info)
+    min_free_memory = min(gpu['free_gb'] for gpu in gpu_info)
+
+    # Increase batch size based on number of GPUs and available memory
+    # With model parallelism, we want to keep the pipeline full
+    if num_gpus > 1:
+        # Pipeline depth: process multiple batches simultaneously
+        optimal_batch_size = base_batch_size * num_gpus
+        logger.info(f"Using pipeline batch size: {optimal_batch_size} (base={base_batch_size} × {num_gpus} GPUs)")
+    else:
+        optimal_batch_size = base_batch_size
+        logger.info(f"Single GPU mode, using batch size: {optimal_batch_size}")
+
+    return optimal_batch_size
 
 
 @dataclass
@@ -42,9 +139,16 @@ class DirectActivationExtractor:
     ):
         self.model_name = model_name
         self.device = device
+
+        # Detect available GPUs
+        self.gpu_info = get_available_gpus()
+        log_gpu_info(self.gpu_info)
+
         use_8bit = torch.cuda.is_available()
         logger.info(f"Loading model {model_name} directly (device={device}, 8bit={use_8bit})...")
 
+        # Use device_map="auto" for automatic multi-GPU distribution
+        # This will spread layers across all available GPUs
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
             device_map="auto",
@@ -52,6 +156,17 @@ class DirectActivationExtractor:
             torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
         )
         self.model.eval()
+
+        # Log which layers are on which devices
+        if hasattr(self.model, 'hf_device_map'):
+            logger.info("Model layer distribution across GPUs:")
+            device_layers = {}
+            for layer_name, device in self.model.hf_device_map.items():
+                if device not in device_layers:
+                    device_layers[device] = []
+                device_layers[device].append(layer_name)
+            for device, layers in sorted(device_layers.items()):
+                logger.info(f"  {device}: {len(layers)} components")
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         if self.tokenizer.pad_token is None:
@@ -65,6 +180,7 @@ class DirectActivationExtractor:
         )
 
         self.max_layers = max_layers
+        self.num_gpus = len(self.gpu_info)
 
     def select_layers(self) -> List[int]:
         if self.max_layers is None:
@@ -88,6 +204,7 @@ class DirectActivationExtractor:
         cache_file: str,
         batch_size: int = 4,
         max_length: int = 512,
+        pipeline_depth: Optional[int] = None,
     ) -> None:
         """Extract activations from all specified layers in a single pass and save incrementally to HDF5.
 
@@ -97,6 +214,7 @@ class DirectActivationExtractor:
             cache_file: Path to HDF5 cache file
             batch_size: Batch size for processing
             max_length: Max sequence length
+            pipeline_depth: Number of batches to process in parallel (default: num_gpus for pipeline parallelism)
         """
         # Use their TokenizedDataset to get proper detection masks
         tokenized = TokenizedDataset.from_dataset(
@@ -104,6 +222,16 @@ class DirectActivationExtractor:
             self.tokenizer,
             max_length=max_length,
         )
+
+        # Set pipeline depth based on number of GPUs
+        if pipeline_depth is None:
+            pipeline_depth = max(1, self.num_gpus)
+
+        logger.info(f"Using pipeline depth: {pipeline_depth} (keeping {pipeline_depth} batches in flight)")
+
+        # Start GPU monitoring
+        gpu_monitor = GPUMonitor(interval=30)
+        gpu_monitor.start()
 
         # Initialize HDF5 file with datasets for each layer
         with h5py.File(cache_file, 'w') as f:
@@ -133,13 +261,17 @@ class DirectActivationExtractor:
                 chunks=True
             )
 
-        # Process batches and incrementally append to HDF5
-        for i in range(0, len(tokenized), batch_size):
-            batch_tokenized = tokenized[i : i + batch_size]
-            batch_labels = dataset.labels[i : i + batch_size]
+        # Process batches with pipelined execution
+        # Use a queue to manage concurrent batch processing
+        batch_queue = Queue(maxsize=pipeline_depth)
+        write_lock = threading.Lock()
+        total_batches = (len(tokenized) + batch_size - 1) // batch_size
 
+        def process_batch(batch_idx, batch_tokenized, batch_labels):
+            """Process a single batch and return results."""
             with torch.no_grad():
                 # Direct forward pass with output_hidden_states=True
+                # Note: inputs are automatically moved to correct devices by device_map
                 outputs = self.model(
                     input_ids=batch_tokenized.tokens.to(self.device),
                     attention_mask=batch_tokenized.attention_mask.to(self.device),
@@ -173,7 +305,11 @@ class DirectActivationExtractor:
                     # Labels are same for all layers
                     batch_labels_collected.extend([label] * num_tokens)
 
-                # Append to HDF5 file
+                return batch_idx, batch_activations, batch_labels_collected
+
+        def write_batch_to_hdf5(batch_idx, batch_activations, batch_labels_collected):
+            """Write batch results to HDF5 file."""
+            with write_lock:
                 with h5py.File(cache_file, 'a') as f:
                     for layer_idx in layer_indices:
                         # Concatenate batch activations for this layer
@@ -195,7 +331,34 @@ class DirectActivationExtractor:
                     labels_dset.resize(new_size, axis=0)
                     labels_dset[current_size:new_size] = batch_labels_collected
 
-            logger.info(f"Processed batch {i//batch_size + 1}/{(len(tokenized) + batch_size - 1)//batch_size}")
+                logger.info(f"Processed batch {batch_idx + 1}/{total_batches}")
+
+        # Use ThreadPoolExecutor for parallel batch processing
+        with ThreadPoolExecutor(max_workers=pipeline_depth) as executor:
+            futures = []
+
+            for i in range(0, len(tokenized), batch_size):
+                batch_idx = i // batch_size
+                batch_tokenized = tokenized[i : i + batch_size]
+                batch_labels = dataset.labels[i : i + batch_size]
+
+                # Submit batch for processing
+                future = executor.submit(process_batch, batch_idx, batch_tokenized, batch_labels)
+                futures.append(future)
+
+                # If we have enough batches in flight, wait for one to complete and write it
+                if len(futures) >= pipeline_depth:
+                    completed_future = futures.pop(0)
+                    batch_idx, batch_activations, batch_labels_collected = completed_future.result()
+                    write_batch_to_hdf5(batch_idx, batch_activations, batch_labels_collected)
+
+            # Process remaining futures
+            for future in futures:
+                batch_idx, batch_activations, batch_labels_collected = future.result()
+                write_batch_to_hdf5(batch_idx, batch_activations, batch_labels_collected)
+
+        # Stop GPU monitoring
+        gpu_monitor.stop()
 
     def load_activations_from_cache(
         self,
@@ -494,6 +657,12 @@ def main():
         default=512,
         help="Maximum sequence length for tokenization (default: 512)",
     )
+    parser.add_argument(
+        "--pipeline-depth",
+        type=int,
+        default=None,
+        help="Number of batches to process in parallel (default: auto-detect based on GPU count)",
+    )
 
     args = parser.parse_args()
 
@@ -513,9 +682,30 @@ def main():
 
     try:
         logger.info("--- Initializing direct extraction model ---")
+        logger.info("Detecting available GPUs...")
+
+        # Get GPU info before model loading
+        initial_gpu_info = get_available_gpus()
+        log_gpu_info(initial_gpu_info)
+
+        # Initialize extractor (will load model across GPUs)
         extractor = DirectActivationExtractor(
             model_name=model_name, max_layers=args.max_layers
         )
+
+        # Calculate optimal batch size based on GPU count
+        optimal_batch_size = calculate_optimal_batch_size(
+            extractor.gpu_info,
+            base_batch_size=args.batch_size
+        )
+
+        # Override batch size if auto-calculated
+        if len(extractor.gpu_info) > 1:
+            logger.info(f"Multi-GPU detected: adjusting batch processing for pipeline parallelism")
+            # We keep the base batch size but increase pipeline depth
+            actual_batch_size = args.batch_size
+        else:
+            actual_batch_size = args.batch_size
 
         logger.info(f"--- Loading training datasets: {train_dataset_names} ---")
 
@@ -573,26 +763,40 @@ def main():
         # Extract and cache activations if not already cached
         if not os.path.exists(train_cache_file):
             logger.info("Extracting train activations for all layers (this will be cached)...")
+            logger.info(f"GPU status before extraction:")
+            log_gpu_info(get_available_gpus())
+
             extractor.extract_activations_all_layers(
                 train_dataset,
                 layer_indices,
                 train_cache_file,
-                batch_size=args.batch_size,
+                batch_size=actual_batch_size,
                 max_length=args.max_length,
+                pipeline_depth=args.pipeline_depth,
             )
+
+            logger.info(f"GPU status after extraction:")
+            log_gpu_info(get_available_gpus())
             logger.info(f"Train activations cached to: {train_cache_file}")
         else:
             logger.info(f"Using cached train activations from: {train_cache_file}")
 
         if not os.path.exists(val_cache_file):
             logger.info("Extracting validation activations for all layers (this will be cached)...")
+            logger.info(f"GPU status before extraction:")
+            log_gpu_info(get_available_gpus())
+
             extractor.extract_activations_all_layers(
                 val_dataset,
                 layer_indices,
                 val_cache_file,
-                batch_size=args.batch_size,
+                batch_size=actual_batch_size,
                 max_length=args.max_length,
+                pipeline_depth=args.pipeline_depth,
             )
+
+            logger.info(f"GPU status after extraction:")
+            log_gpu_info(get_available_gpus())
             logger.info(f"Validation activations cached to: {val_cache_file}")
         else:
             logger.info(f"Using cached validation activations from: {val_cache_file}")
@@ -667,13 +871,20 @@ def main():
         # Extract and cache test activations if not already cached
         if not os.path.exists(test_cache_file):
             logger.info("Extracting test activations for all layers (this will be cached)...")
+            logger.info(f"GPU status before extraction:")
+            log_gpu_info(get_available_gpus())
+
             extractor.extract_activations_all_layers(
                 test_dataset,
                 layer_indices,
                 test_cache_file,
-                batch_size=args.batch_size,
+                batch_size=actual_batch_size,
                 max_length=args.max_length,
+                pipeline_depth=args.pipeline_depth,
             )
+
+            logger.info(f"GPU status after extraction:")
+            log_gpu_info(get_available_gpus())
             logger.info(f"Test activations cached to: {test_cache_file}")
         else:
             logger.info(f"Using cached test activations from: {test_cache_file}")
