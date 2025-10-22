@@ -44,7 +44,9 @@ class NNsightActivationExtractor:
         self.model_name = model_name
         self.device = device
         use_8bit = torch.cuda.is_available()
-        logger.info(f"Loading model {model_name} with nnsight (device={device}, 8bit={use_8bit})...")
+        logger.info(
+            f"Loading model {model_name} with nnsight (device={device}, 8bit={use_8bit})..."
+        )
         self.model = LanguageModel(model_name, device_map="auto", load_in_8bit=use_8bit)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         if self.tokenizer.pad_token is None:
@@ -99,31 +101,27 @@ class NNsightActivationExtractor:
         )
 
         # Initialize HDF5 file with datasets for each layer
-        with h5py.File(cache_file, 'w') as f:
+        with h5py.File(cache_file, "w") as f:
             # Store metadata
-            f.attrs['num_layers'] = len(layer_indices)
-            f.attrs['layer_indices'] = layer_indices
-            f.attrs['hidden_size'] = self.hidden_size
+            f.attrs["num_layers"] = len(layer_indices)
+            f.attrs["layer_indices"] = layer_indices
+            f.attrs["hidden_size"] = self.hidden_size
 
             # Create extensible datasets for each layer
             for layer_idx in layer_indices:
                 f.create_dataset(
-                    f'layer_{layer_idx}',
+                    f"layer_{layer_idx}",
                     shape=(0, self.hidden_size),
                     maxshape=(None, self.hidden_size),
-                    dtype='float32',
+                    dtype="float32",
                     chunks=True,
-                    compression='gzip',
-                    compression_opts=4
+                    compression="gzip",
+                    compression_opts=4,
                 )
 
             # Create dataset for labels (shared across all layers)
             f.create_dataset(
-                'labels',
-                shape=(0,),
-                maxshape=(None,),
-                dtype='int32',
-                chunks=True
+                "labels", shape=(0,), maxshape=(None,), dtype="int32", chunks=True
             )
 
         # Process batches and incrementally append to HDF5
@@ -139,7 +137,9 @@ class NNsightActivationExtractor:
                     # Save all layer outputs at once
                     layer_outputs = {}
                     for layer_idx in layer_indices:
-                        layer_outputs[layer_idx] = self.model.model.layers[layer_idx].output.save()
+                        layer_outputs[layer_idx] = self.model.model.layers[
+                            layer_idx
+                        ].output.save()
 
                 # Extract activations at detection mask positions for each layer
                 detection_mask = batch_tokenized.detection_mask
@@ -157,20 +157,24 @@ class NNsightActivationExtractor:
                     # Extract for each layer
                     for layer_idx in layer_indices:
                         hidden_states = layer_outputs[layer_idx].cpu()
-                        dialogue_acts = hidden_states[j][mask_positions]  # [num_detect_tokens, hidden_dim]
+                        dialogue_acts = hidden_states[j][
+                            mask_positions
+                        ]  # [num_detect_tokens, hidden_dim]
                         batch_activations[layer_idx].append(dialogue_acts)
 
                     # Labels are same for all layers
                     batch_labels_collected.extend([label] * num_tokens)
 
                 # Append to HDF5 file
-                with h5py.File(cache_file, 'a') as f:
+                with h5py.File(cache_file, "a") as f:
                     for layer_idx in layer_indices:
                         # Concatenate batch activations for this layer
-                        layer_acts = torch.cat(batch_activations[layer_idx], dim=0).numpy()
+                        layer_acts = torch.cat(
+                            batch_activations[layer_idx], dim=0
+                        ).numpy()
 
                         # Get current dataset
-                        dset = f[f'layer_{layer_idx}']
+                        dset = f[f"layer_{layer_idx}"]
                         current_size = dset.shape[0]
                         new_size = current_size + layer_acts.shape[0]
 
@@ -179,13 +183,15 @@ class NNsightActivationExtractor:
                         dset[current_size:new_size] = layer_acts
 
                     # Append labels (only once since shared)
-                    labels_dset = f['labels']
+                    labels_dset = f["labels"]
                     current_size = labels_dset.shape[0]
                     new_size = current_size + len(batch_labels_collected)
                     labels_dset.resize(new_size, axis=0)
                     labels_dset[current_size:new_size] = batch_labels_collected
 
-            logger.info(f"Processed batch {i//batch_size + 1}/{(len(tokenized) + batch_size - 1)//batch_size}")
+            logger.info(
+                f"Processed batch {i//batch_size + 1}/{(len(tokenized) + batch_size - 1)//batch_size}"
+            )
 
     def load_activations_from_cache(
         self,
@@ -201,9 +207,9 @@ class NNsightActivationExtractor:
         Returns:
             ActivationCache with activations and labels for the specified layer
         """
-        with h5py.File(cache_file, 'r') as f:
-            activations = torch.tensor(f[f'layer_{layer_idx}'][:], dtype=torch.float32)
-            labels = torch.tensor(f['labels'][:], dtype=torch.long)
+        with h5py.File(cache_file, "r") as f:
+            activations = torch.tensor(f[f"layer_{layer_idx}"][:], dtype=torch.float32)
+            labels = torch.tensor(f["labels"][:], dtype=torch.long)
 
         return ActivationCache(
             activations=activations,
@@ -218,7 +224,7 @@ def train_probe(
     labels: torch.Tensor,
     train_indices: List[int],
     val_indices: List[int],
-    max_iter: int = 1000,
+    max_iter: int = 10000,
     break_probe: bool = False,
 ) -> Tuple[LogisticRegression, StandardScaler, Dict[str, float]]:
     if break_probe:
@@ -519,11 +525,13 @@ def main():
         combined_dataset = combine_datasets(
             train_datasets,
             train_dataset_names,
-            target_samples_per_dataset if len(train_dataset_names) > 1 else None
+            target_samples_per_dataset if len(train_dataset_names) > 1 else None,
         )
 
         logger.info(f"Total training dialogues: {len(combined_dataset.dialogues)}")
-        deceptive_count = sum(1 for l in combined_dataset.labels if l.value == "deceptive")
+        deceptive_count = sum(
+            1 for l in combined_dataset.labels if l.value == "deceptive"
+        )
         logger.info(
             f"Label distribution: {deceptive_count} deceptive, {len(combined_dataset.labels) - deceptive_count} honest"
         )
@@ -531,16 +539,27 @@ def main():
         # Split dataset at dialogue level
         logger.info("--- Creating train/validation splits ---")
         from copy import deepcopy
+
         num_dialogues = len(combined_dataset.dialogues)
         num_val = int(num_dialogues * 0.2)
 
         # Sequential split (matching the original implementation)
         train_dataset = deepcopy(combined_dataset)
-        train_dataset.dialogues = combined_dataset.dialogues[:-num_val] if num_val > 0 else combined_dataset.dialogues
-        train_dataset.labels = combined_dataset.labels[:-num_val] if num_val > 0 else combined_dataset.labels
+        train_dataset.dialogues = (
+            combined_dataset.dialogues[:-num_val]
+            if num_val > 0
+            else combined_dataset.dialogues
+        )
+        train_dataset.labels = (
+            combined_dataset.labels[:-num_val]
+            if num_val > 0
+            else combined_dataset.labels
+        )
 
         val_dataset = deepcopy(combined_dataset)
-        val_dataset.dialogues = combined_dataset.dialogues[-num_val:] if num_val > 0 else []
+        val_dataset.dialogues = (
+            combined_dataset.dialogues[-num_val:] if num_val > 0 else []
+        )
         val_dataset.labels = combined_dataset.labels[-num_val:] if num_val > 0 else []
 
         logger.info(
@@ -554,15 +573,25 @@ def main():
 
         # Generate cache filenames
         train_cache_file = get_cache_filename(
-            model_name, train_dataset_names, "train", args.max_length, target_samples_per_dataset
+            model_name,
+            train_dataset_names,
+            "train",
+            args.max_length,
+            target_samples_per_dataset,
         )
         val_cache_file = get_cache_filename(
-            model_name, train_dataset_names, "val", args.max_length, target_samples_per_dataset
+            model_name,
+            train_dataset_names,
+            "val",
+            args.max_length,
+            target_samples_per_dataset,
         )
 
         # Extract and cache activations if not already cached
         if not os.path.exists(train_cache_file):
-            logger.info("Extracting train activations for all layers (this will be cached)...")
+            logger.info(
+                "Extracting train activations for all layers (this will be cached)..."
+            )
             extractor.extract_activations_all_layers(
                 train_dataset,
                 layer_indices,
@@ -575,7 +604,9 @@ def main():
             logger.info(f"Using cached train activations from: {train_cache_file}")
 
         if not os.path.exists(val_cache_file):
-            logger.info("Extracting validation activations for all layers (this will be cached)...")
+            logger.info(
+                "Extracting validation activations for all layers (this will be cached)..."
+            )
             extractor.extract_activations_all_layers(
                 val_dataset,
                 layer_indices,
@@ -598,13 +629,19 @@ def main():
 
             logger.info(f"Loading activations from cache for layer {layer_idx}...")
             # Load from cache
-            train_cache = extractor.load_activations_from_cache(train_cache_file, layer_idx)
+            train_cache = extractor.load_activations_from_cache(
+                train_cache_file, layer_idx
+            )
             val_cache = extractor.load_activations_from_cache(val_cache_file, layer_idx)
 
-            logger.info(f"Train tokens: {len(train_cache.activations)}, Val tokens: {len(val_cache.activations)}")
+            logger.info(
+                f"Train tokens: {len(train_cache.activations)}, Val tokens: {len(val_cache.activations)}"
+            )
 
             # Combine and create indices for the probe training function
-            all_acts = torch.cat([train_cache.activations, val_cache.activations], dim=0)
+            all_acts = torch.cat(
+                [train_cache.activations, val_cache.activations], dim=0
+            )
             all_labels = torch.cat([train_cache.labels, val_cache.labels], dim=0)
             train_indices = list(range(len(train_cache.activations)))
             val_indices = list(range(len(train_cache.activations), len(all_acts)))
@@ -615,7 +652,7 @@ def main():
                 all_labels,
                 train_indices,
                 val_indices,
-                max_iter=1000,
+                max_iter=10000,
             )
 
             probe_path = os.path.join(save_dir, f"probe_layer_{layer_idx}.pkl")
@@ -656,7 +693,9 @@ def main():
 
         # Extract and cache test activations if not already cached
         if not os.path.exists(test_cache_file):
-            logger.info("Extracting test activations for all layers (this will be cached)...")
+            logger.info(
+                "Extracting test activations for all layers (this will be cached)..."
+            )
             extractor.extract_activations_all_layers(
                 test_dataset,
                 layer_indices,
@@ -669,8 +708,12 @@ def main():
             logger.info(f"Using cached test activations from: {test_cache_file}")
 
         for layer_idx in layer_indices:
-            logger.info(f"\nLoading test activations from cache for layer {layer_idx}...")
-            test_cache = extractor.load_activations_from_cache(test_cache_file, layer_idx)
+            logger.info(
+                f"\nLoading test activations from cache for layer {layer_idx}..."
+            )
+            test_cache = extractor.load_activations_from_cache(
+                test_cache_file, layer_idx
+            )
 
             probe = all_probe_results[layer_idx]["probe"]
             scaler = all_probe_results[layer_idx]["scaler"]
@@ -710,7 +753,9 @@ def main():
         logger.info(
             f"Training datasets: {', '.join(train_dataset_names)} ({len(train_dataset.dialogues)} train + {len(val_dataset.dialogues)} val dialogues)"
         )
-        logger.info(f"Test dataset: {test_dataset_name} ({len(test_dataset.dialogues)} dialogues)")
+        logger.info(
+            f"Test dataset: {test_dataset_name} ({len(test_dataset.dialogues)} dialogues)"
+        )
         logger.info(f"Results saved to: {args.output} ({len(all_results)} rows)")
         logger.info("=" * 60)
 
